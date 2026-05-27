@@ -1217,4 +1217,162 @@ mod settlement_tests {
         assert!(result.is_err());
         assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
     }
+
+    // ── batch_receive_payment tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_batch_receive_payment_credits_multiple_developers() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev1 = Address::generate(&env);
+        let dev2 = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev1.clone(), 100i128));
+        items.push_back((dev2.clone(), 200i128));
+
+        client.batch_receive_payment(&vault, &items);
+
+        assert_eq!(client.get_developer_balance(&dev1), 100i128);
+        assert_eq!(client.get_developer_balance(&dev2), 200i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_accumulates_existing_balance() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        client.receive_payment(&vault, &50i128, &false, &Some(dev.clone()));
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 75i128));
+        client.batch_receive_payment(&vault, &items);
+
+        assert_eq!(client.get_developer_balance(&dev), 125i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_admin_caller_allowed() {
+        let (env, addr, admin, _vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 300i128));
+        client.batch_receive_payment(&admin, &items);
+
+        assert_eq!(client.get_developer_balance(&dev), 300i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_empty_batch() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        let items: soroban_sdk::Vec<(Address, i128)> = soroban_sdk::Vec::new(&env);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err())
+            .contains("batch_receive_payment requires at least one item"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_oversized_batch() {
+        use crate::MAX_BATCH_SIZE;
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            items.push_back((dev.clone(), 1i128));
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("batch too large"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_zero_amount() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 0i128));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("amount must be positive"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_negative_amount() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), -1i128));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("amount must be positive"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_unauthorized_caller_rejected() {
+        let (env, addr, _admin, _vault, third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 100i128));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&third_party, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err())
+            .contains("unauthorized: caller must be vault or admin"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_single_item() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 999i128));
+        client.batch_receive_payment(&vault, &items);
+
+        assert_eq!(client.get_developer_balance(&dev), 999i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_max_batch_size_accepted() {
+        use crate::MAX_BATCH_SIZE;
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        let mut devs = std::vec::Vec::new();
+        for _ in 0..MAX_BATCH_SIZE {
+            let dev = Address::generate(&env);
+            devs.push(dev.clone());
+            items.push_back((dev, 1i128));
+        }
+        client.batch_receive_payment(&vault, &items);
+
+        for dev in &devs {
+            assert_eq!(client.get_developer_balance(dev), 1i128);
+        }
+    }
 }

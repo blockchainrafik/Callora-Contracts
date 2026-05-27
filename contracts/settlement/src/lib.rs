@@ -198,6 +198,69 @@ impl CalloraSettlement {
         }
     }
 
+    /// Atomically credit multiple developer balances in a single call.
+    ///
+    /// # Arguments
+    /// * `caller` - Must be the registered vault address or admin
+    /// * `items` - Vec of `(developer_address, amount)` pairs; 1–[`MAX_BATCH_SIZE`] entries
+    ///
+    /// # Access Control
+    /// Only the registered vault address or admin can call this function.
+    ///
+    /// # Validation
+    /// All amounts must be `> 0`. Empty and oversized batches are rejected before any state change.
+    ///
+    /// # Atomicity
+    /// All validation runs before any state is written. A failure on any item leaves the
+    /// contract state unchanged.
+    ///
+    /// # Events
+    /// Emits `balance_credited` for each item in the batch.
+    ///
+    /// # Panics
+    /// * `"batch_receive_payment requires at least one item"` — empty batch
+    /// * `"batch too large"` — more than [`MAX_BATCH_SIZE`] items
+    /// * `"amount must be positive"` — any amount ≤ 0
+    /// * `"developer balance overflow"` — `i128` overflow on any developer balance
+    pub fn batch_receive_payment(env: Env, caller: Address, items: Vec<(Address, i128)>) {
+        caller.require_auth();
+        Self::require_authorized_caller(env.clone(), caller.clone());
+
+        let n = items.len();
+        assert!(n > 0, "batch_receive_payment requires at least one item");
+        assert!(n <= MAX_BATCH_SIZE, "batch too large");
+
+        // Validate all amounts before touching state.
+        for item in items.iter() {
+            let (_, amount) = item;
+            assert!(amount > 0, "amount must be positive");
+        }
+
+        let inst = env.storage().instance();
+        let mut balances: Map<Address, i128> = inst
+            .get(&Symbol::new(&env, DEVELOPER_BALANCES_KEY))
+            .unwrap_or_else(|| Map::new(&env));
+
+        for item in items.iter() {
+            let (dev, amount) = item;
+            let current = balances.get(dev.clone()).unwrap_or(0);
+            let new_balance = current
+                .checked_add(amount)
+                .unwrap_or_else(|| panic!("developer balance overflow"));
+            balances.set(dev.clone(), new_balance);
+            env.events().publish(
+                (Symbol::new(&env, "balance_credited"), dev.clone()),
+                BalanceCreditedEvent {
+                    developer: dev,
+                    amount,
+                    new_balance,
+                },
+            );
+        }
+
+        inst.set(&Symbol::new(&env, DEVELOPER_BALANCES_KEY), &balances);
+    }
+
     /// Get current admin address
     pub fn get_admin(env: Env) -> Address {
         env.storage()
