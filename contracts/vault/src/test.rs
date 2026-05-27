@@ -3301,9 +3301,18 @@ fn batch_deduct_events_fire_in_input_order() {
 
     let items = soroban_sdk::vec![
         &env,
-        DeductItem { amount: 100, request_id: Some(rid0.clone()) },
-        DeductItem { amount: 200, request_id: Some(rid1.clone()) },
-        DeductItem { amount: 300, request_id: Some(rid2.clone()) },
+        DeductItem {
+            amount: 100,
+            request_id: Some(rid0.clone())
+        },
+        DeductItem {
+            amount: 200,
+            request_id: Some(rid1.clone())
+        },
+        DeductItem {
+            amount: 300,
+            request_id: Some(rid2.clone())
+        },
     ];
 
     client.batch_deduct(&caller, &items);
@@ -3315,12 +3324,10 @@ fn batch_deduct_events_fire_in_input_order() {
     let deduct_events: std::vec::Vec<_> = all
         .iter()
         .filter(|e| {
-            e.0 == vault_address
-                && e.1.len() >= 3
-                && {
-                    let t: Symbol = e.1.get(0).unwrap().into_val(&env);
-                    t == deduct_sym
-                }
+            e.0 == vault_address && e.1.len() >= 3 && {
+                let t: Symbol = e.1.get(0).unwrap().into_val(&env);
+                t == deduct_sym
+            }
         })
         .collect();
 
@@ -3357,9 +3364,18 @@ fn batch_deduct_events_carry_correct_running_balance() {
     // Amounts: 100, 250, 150  →  running balances after each: 900, 650, 500
     let items = soroban_sdk::vec![
         &env,
-        DeductItem { amount: 100, request_id: Some(Symbol::new(&env, "r0")) },
-        DeductItem { amount: 250, request_id: Some(Symbol::new(&env, "r1")) },
-        DeductItem { amount: 150, request_id: Some(Symbol::new(&env, "r2")) },
+        DeductItem {
+            amount: 100,
+            request_id: Some(Symbol::new(&env, "r0"))
+        },
+        DeductItem {
+            amount: 250,
+            request_id: Some(Symbol::new(&env, "r1"))
+        },
+        DeductItem {
+            amount: 150,
+            request_id: Some(Symbol::new(&env, "r2"))
+        },
     ];
 
     client.batch_deduct(&caller, &items);
@@ -3370,12 +3386,10 @@ fn batch_deduct_events_carry_correct_running_balance() {
     let deduct_events: std::vec::Vec<_> = all
         .iter()
         .filter(|e| {
-            e.0 == vault_address
-                && e.1.len() >= 3
-                && {
-                    let t: Symbol = e.1.get(0).unwrap().into_val(&env);
-                    t == deduct_sym
-                }
+            e.0 == vault_address && e.1.len() >= 3 && {
+                let t: Symbol = e.1.get(0).unwrap().into_val(&env);
+                t == deduct_sym
+            }
         })
         .collect();
 
@@ -3414,25 +3428,44 @@ fn batch_deduct_max_deduct_violation_at_index_0_reverts_all() {
 
     let items = soroban_sdk::vec![
         &env,
-        DeductItem { amount: 100, request_id: Some(Symbol::new(&env, "bad0")) }, // violates
-        DeductItem { amount: 10,  request_id: Some(Symbol::new(&env, "ok1"))  },
-        DeductItem { amount: 10,  request_id: Some(Symbol::new(&env, "ok2"))  },
+        DeductItem {
+            amount: 100,
+            request_id: Some(Symbol::new(&env, "bad0"))
+        }, // violates
+        DeductItem {
+            amount: 10,
+            request_id: Some(Symbol::new(&env, "ok1"))
+        },
+        DeductItem {
+            amount: 10,
+            request_id: Some(Symbol::new(&env, "ok2"))
+        },
     ];
 
     let result = client.try_batch_deduct(&caller, &items);
     assert!(result.is_err(), "expected batch to be rejected");
-    assert_eq!(client.balance(), before, "balance must not change on revert");
+    assert_eq!(
+        client.balance(),
+        before,
+        "balance must not change on revert"
+    );
 
     let deduct_sym = Symbol::new(&env, "deduct");
-    let deduct_count = env.events().all().iter().filter(|e| {
-        e.0 == vault_address
-            && e.1.len() >= 1
-            && {
+    let deduct_count = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| {
+            e.0 == vault_address && e.1.len() >= 1 && {
                 let t: Symbol = e.1.get(0).unwrap().into_val(&env);
                 t == deduct_sym
             }
-    }).count();
-    assert_eq!(deduct_count, 0, "no deduct events must be emitted on full revert");
+        })
+        .count();
+    assert_eq!(
+        deduct_count, 0,
+        "no deduct events must be emitted on full revert"
+    );
 }
 
 /// A max_deduct violation on a MIDDLE item must revert the entire batch —
@@ -3454,25 +3487,44 @@ fn batch_deduct_max_deduct_violation_at_middle_index_reverts_all() {
 
     let items = soroban_sdk::vec![
         &env,
-        DeductItem { amount: 10,  request_id: Some(Symbol::new(&env, "ok0"))  },
-        DeductItem { amount: 75,  request_id: Some(Symbol::new(&env, "bad1")) }, // violates
-        DeductItem { amount: 10,  request_id: Some(Symbol::new(&env, "ok2"))  },
+        DeductItem {
+            amount: 10,
+            request_id: Some(Symbol::new(&env, "ok0"))
+        },
+        DeductItem {
+            amount: 75,
+            request_id: Some(Symbol::new(&env, "bad1"))
+        }, // violates
+        DeductItem {
+            amount: 10,
+            request_id: Some(Symbol::new(&env, "ok2"))
+        },
     ];
 
     let result = client.try_batch_deduct(&caller, &items);
     assert!(result.is_err(), "expected batch to be rejected");
-    assert_eq!(client.balance(), before, "balance must not change on revert");
+    assert_eq!(
+        client.balance(),
+        before,
+        "balance must not change on revert"
+    );
 
     let deduct_sym = Symbol::new(&env, "deduct");
-    let deduct_count = env.events().all().iter().filter(|e| {
-        e.0 == vault_address
-            && e.1.len() >= 1
-            && {
+    let deduct_count = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| {
+            e.0 == vault_address && e.1.len() >= 1 && {
                 let t: Symbol = e.1.get(0).unwrap().into_val(&env);
                 t == deduct_sym
             }
-    }).count();
-    assert_eq!(deduct_count, 0, "no deduct events must be emitted on full revert");
+        })
+        .count();
+    assert_eq!(
+        deduct_count, 0,
+        "no deduct events must be emitted on full revert"
+    );
 }
 
 /// A max_deduct violation on the LAST item must revert the entire batch —
@@ -3494,23 +3546,42 @@ fn batch_deduct_max_deduct_violation_at_last_index_reverts_all() {
 
     let items = soroban_sdk::vec![
         &env,
-        DeductItem { amount: 10,  request_id: Some(Symbol::new(&env, "ok0"))  },
-        DeductItem { amount: 10,  request_id: Some(Symbol::new(&env, "ok1"))  },
-        DeductItem { amount: 99,  request_id: Some(Symbol::new(&env, "bad2")) }, // violates
+        DeductItem {
+            amount: 10,
+            request_id: Some(Symbol::new(&env, "ok0"))
+        },
+        DeductItem {
+            amount: 10,
+            request_id: Some(Symbol::new(&env, "ok1"))
+        },
+        DeductItem {
+            amount: 99,
+            request_id: Some(Symbol::new(&env, "bad2"))
+        }, // violates
     ];
 
     let result = client.try_batch_deduct(&caller, &items);
     assert!(result.is_err(), "expected batch to be rejected");
-    assert_eq!(client.balance(), before, "balance must not change on revert");
+    assert_eq!(
+        client.balance(),
+        before,
+        "balance must not change on revert"
+    );
 
     let deduct_sym = Symbol::new(&env, "deduct");
-    let deduct_count = env.events().all().iter().filter(|e| {
-        e.0 == vault_address
-            && e.1.len() >= 1
-            && {
+    let deduct_count = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| {
+            e.0 == vault_address && e.1.len() >= 1 && {
                 let t: Symbol = e.1.get(0).unwrap().into_val(&env);
                 t == deduct_sym
             }
-    }).count();
-    assert_eq!(deduct_count, 0, "no deduct events must be emitted on full revert");
+        })
+        .count();
+    assert_eq!(
+        deduct_count, 0,
+        "no deduct events must be emitted on full revert"
+    );
 }
