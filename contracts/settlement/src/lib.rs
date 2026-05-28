@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, Env, Symbol, Vec};
 
 /// Persistent storage keys for settlement contract
 #[contracttype]
@@ -12,6 +12,7 @@ pub enum StorageKey {
     DeveloperIndex,
     DeveloperBalance(Address),
     GlobalPool,
+    Usdc,
 }
 
 /// Developer balance record in settlement contract
@@ -56,6 +57,26 @@ pub struct BalanceCreditedEvent {
     pub new_balance: i128,
 }
 
+/// Emitted when a developer withdraws tracked USDC from settlement.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeveloperWithdrawEvent {
+    pub developer: Address,
+    pub amount: i128,
+    pub remaining_balance: i128,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SettlementError {
+    ContractNotInitialized = 1,
+    UsdcTokenNotConfigured = 2,
+    AmountNotPositive = 3,
+    InsufficientDeveloperBalance = 4,
+    DeveloperBalanceUnderflow = 5,
+    InsufficientContractBalance = 6,
+}
+
 /// Emitted when the registered vault address is changed via `set_vault()`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -64,14 +85,7 @@ pub struct VaultChangedEvent {
     pub new_vault: Address,
 }
 
-/// Storage key for the registered vault address.
-const VAULT_KEY: &str = "vault";
-/// Storage key for the admin address.
-const ADMIN_KEY: &str = "admin";
-const PENDING_ADMIN_KEY: &str = "pending_admin";
-const DEVELOPER_BALANCES_KEY: &str = "developer_balances";
-/// Storage key for the global pool state.
-const GLOBAL_POOL_KEY: &str = "global_pool";
+const MAX_BATCH_SIZE: u32 = 100;
 
 #[contract]
 pub struct CalloraSettlement;
@@ -109,10 +123,10 @@ impl CalloraSettlement {
         if vault_address == env.current_contract_address() {
             panic!("invalid config: vault_address cannot be the contract itself");
         }
-        inst.set(&Symbol::new(&env, ADMIN_KEY), &admin);
-        inst.set(&Symbol::new(&env, VAULT_KEY), &vault_address);
-        let empty_balances: Map<Address, i128> = Map::new(&env);
-        inst.set(&Symbol::new(&env, DEVELOPER_BALANCES_KEY), &empty_balances);
+        inst.set(&StorageKey::Admin, &admin);
+        inst.set(&StorageKey::Vault, &vault_address);
+        let empty_index: Vec<Address> = Vec::new(&env);
+        inst.set(&StorageKey::DeveloperIndex, &empty_index);
         let global_pool = GlobalPool {
             total_balance: 0,
             last_updated: env.ledger().timestamp(),
@@ -186,7 +200,7 @@ impl CalloraSettlement {
 
 
             // Read current balance from persistent storage
-            let current_balance = env
+            let current_balance: i128 = env
                 .storage()
                 .persistent()
                 .get(&StorageKey::DeveloperBalance(dev_address.clone()))
@@ -209,7 +223,7 @@ impl CalloraSettlement {
             let mut index: Vec<Address> = inst
                 .get(&StorageKey::DeveloperIndex)
                 .unwrap_or_else(|| Vec::new(&env));
-            if !index.iter().any(|addr| addr == &dev_address) {
+            if !index.iter().any(|addr| addr == dev_address) {
                 index.push_back(dev_address.clone());
                 inst.set(&StorageKey::DeveloperIndex, &index);
             }
@@ -274,28 +288,40 @@ impl CalloraSettlement {
         }
 
         let inst = env.storage().instance();
-        let mut balances: Map<Address, i128> = inst
-            .get(&Symbol::new(&env, DEVELOPER_BALANCES_KEY))
-            .unwrap_or_else(|| Map::new(&env));
+        let mut index: Vec<Address> = inst
+            .get(&StorageKey::DeveloperIndex)
+            .unwrap_or_else(|| Vec::new(&env));
 
         for item in items.iter() {
             let (dev, amount) = item;
-            let current = balances.get(dev.clone()).unwrap_or(0);
-            let new_balance = current
+            let current_balance: i128 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::DeveloperBalance(dev.clone()))
+                .unwrap_or(0);
+            let new_balance = current_balance
                 .checked_add(amount)
                 .unwrap_or_else(|| panic!("developer balance overflow"));
-            balances.set(dev.clone(), new_balance);
+            env.storage()
+                .persistent()
+                .set(&StorageKey::DeveloperBalance(dev.clone()), &new_balance);
+            env.storage()
+                .persistent()
+                .extend_ttl(&StorageKey::DeveloperBalance(dev.clone()), 50000, 50000);
+            if !index.iter().any(|addr| addr == dev) {
+                index.push_back(dev.clone());
+            }
             env.events().publish(
                 (Symbol::new(&env, "balance_credited"), dev.clone()),
                 BalanceCreditedEvent {
-                    developer: dev,
-                    amount,
+                    developer: dev.clone(),
+                    amount: amount,
                     new_balance,
                 },
             );
         }
 
-        inst.set(&Symbol::new(&env, DEVELOPER_BALANCES_KEY), &balances);
+        inst.set(&StorageKey::DeveloperIndex, &index);
     }
 
     /// Get current admin address
@@ -343,6 +369,87 @@ impl CalloraSettlement {
             .persistent()
             .get(&StorageKey::DeveloperBalance(developer))
             .unwrap_or(0)
+    }
+
+    /// Configure the USDC token contract address.
+    ///
+    /// Only the current admin may set the on-chain USDC token address that this
+    /// contract will use to execute withdrawals.
+    pub fn set_usdc_token(env: Env, caller: Address, usdc_address: Address) {
+        caller.require_auth();
+        let current_admin = Self::get_admin(env.clone());
+        if caller != current_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+        if usdc_address == env.current_contract_address() {
+            panic!("invalid config: usdc_token cannot be the contract itself");
+        }
+        env.storage()
+            .instance()
+            .set(&StorageKey::Usdc, &usdc_address);
+    }
+
+    fn get_usdc_token(env: Env) -> Result<Address, SettlementError> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::Usdc)
+            .ok_or(SettlementError::UsdcTokenNotConfigured)
+    }
+
+    /// Withdraw developer balance as USDC to the requesting developer.
+    ///
+    /// Requires the developer to authorize the request and the requested amount
+    /// to be positive and covered by the tracked developer balance.
+    pub fn withdraw_developer_balance(
+        env: Env,
+        developer: Address,
+        amount: i128,
+    ) -> Result<(), SettlementError> {
+        developer.require_auth();
+        if amount <= 0 {
+            return Err(SettlementError::AmountNotPositive);
+        }
+
+        let current_balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::DeveloperBalance(developer.clone()))
+            .unwrap_or(0);
+        if amount > current_balance {
+            return Err(SettlementError::InsufficientDeveloperBalance);
+        }
+
+        let new_balance = current_balance
+            .checked_sub(amount)
+            .ok_or(SettlementError::DeveloperBalanceUnderflow)?;
+
+        let usdc_address = Self::get_usdc_token(env.clone())?;
+        let usdc = token::Client::new(&env, &usdc_address);
+        let contract_address = env.current_contract_address();
+
+        if usdc.balance(&contract_address) < amount {
+            return Err(SettlementError::InsufficientContractBalance);
+        }
+
+        usdc.transfer(&contract_address, &developer, &amount);
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::DeveloperBalance(developer.clone()), &new_balance);
+        env.storage()
+            .persistent()
+            .extend_ttl(&StorageKey::DeveloperBalance(developer.clone()), 50000, 50000);
+
+        env.events().publish(
+            (Symbol::new(&env, "developer_withdraw"), developer.clone()),
+            DeveloperWithdrawEvent {
+                developer,
+                amount,
+                remaining_balance: new_balance,
+            },
+        );
+
+        Ok(())
     }
 
     /// Get all developer balances (admin only)
@@ -395,7 +502,7 @@ impl CalloraSettlement {
             let balance = env
                 .storage()
                 .persistent()
-                .get(&StorageKey::DeveloperBalance(address))
+                .get(&StorageKey::DeveloperBalance(address.clone()))
                 .unwrap_or(0);
             result.push_back(DeveloperBalance {
                 address: address.clone(),
@@ -506,7 +613,7 @@ impl CalloraSettlement {
         }
         let inst = env.storage().instance();
         let old_vault = Self::get_vault(env.clone());
-        inst.set(&Symbol::new(&env, VAULT_KEY), &new_vault);
+        inst.set(&StorageKey::Vault, &new_vault);
 
         env.events().publish(
             (Symbol::new(&env, "vault_changed"), caller.clone()),
