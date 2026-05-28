@@ -138,6 +138,16 @@
     },
 
     {
+      "name": "get_pending_admin",
+      "description": "Return the pending admin address, or null if no two-step transfer is in progress. Integrators can poll this to detect an in-flight admin handover before accept_admin is called.",
+      "access": "any",
+      "params": [],
+      "returns": "Address | null",
+      "panics": [],
+      "events": []
+    },
+
+    {
       "name": "get_vault",
       "description": "Return the registered vault contract address.",
       "access": "any",

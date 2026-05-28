@@ -405,6 +405,19 @@ impl CalloraSettlement {
         result
     }
 
+    /// Return the pending admin address, or `None` if no transfer is in progress.
+    ///
+    /// Integrators can poll this to detect an in-flight two-step admin handover
+    /// before `accept_admin` is called.
+    ///
+    /// # Returns
+    /// `Some(Address)` of the nominated admin, or `None` when no transfer is pending.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::PendingAdmin)
+    }
+
     /// Nominate a new admin (admin only).
     ///
     /// # Arguments

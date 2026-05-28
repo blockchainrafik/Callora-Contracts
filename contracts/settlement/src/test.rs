@@ -325,6 +325,38 @@ mod settlement_tests {
     }
 
     #[test]
+    fn test_get_pending_admin_none_before_nomination() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
+    fn test_get_pending_admin_some_after_nomination() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        client.set_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+        // clears after acceptance
+        client.accept_admin();
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
     #[should_panic(expected = "no admin transfer pending")]
     fn test_accept_admin_fails_if_not_nominated() {
         let env = Env::default();
