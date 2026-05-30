@@ -195,10 +195,11 @@ Together with the explicit pre-/post-conditions above, these tests help auditors
 
 **Invariant**: For every reachable state of [`CalloraSettlement`](contracts/settlement/src/lib.rs#L45), every credited developer balance stored under [`DEVELOPER_BALANCES_KEY`](contracts/settlement/src/lib.rs#L42) is always **greater than or equal to 0**.
 
-- **Storage field**: `Map<Address, i128>` stored at `DEVELOPER_BALANCES_KEY`
+- **Storage field**: per-developer persistent storage entries keyed by `StorageKey::DeveloperBalance(Address)`
 - **Accessors**:
   - [`get_developer_balance(env: Env, developer: Address) -> i128`](contracts/settlement/src/lib.rs#L163)
-  - [`get_all_developer_balances(env: Env) -> Vec<DeveloperBalance>`](contracts/settlement/src/lib.rs#L172)
+  - [`get_all_developer_balances(env: Env, caller: Address) -> Result<Vec<DeveloperBalance>, SettlementError>`](contracts/settlement/src/lib.rs#L493)
+  - [`get_developer_balances_page(env: Env, caller: Address, start: u32, limit: u32) -> Result<Vec<DeveloperBalance>, SettlementError>`](contracts/settlement/src/lib.rs#L531)
 - **Guarantee**: Any developer balance returned by these accessors is **never negative**.
 
 This document lists all functions that can change credited developer balances and the pre-/post-conditions that preserve this invariant.

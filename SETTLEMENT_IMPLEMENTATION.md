@@ -165,7 +165,8 @@ pub struct BalanceCreditedEvent {
 3. **Query Functions**
    - `get_admin()`, `get_vault()`, `get_global_pool()`
    - `get_developer_balance(developer)`
-   - `get_all_developer_balances()` (admin only)
+   - `get_all_developer_balances()` (admin only, safe only for <=100 developers)
+   - `get_developer_balances_page(start, limit)` (admin only, paginated)
 
 4. **Admin Functions**
    - `set_admin()` (admin only)
@@ -701,6 +702,9 @@ result
 let index: Vec<Address> = inst
     .get(&StorageKey::DeveloperIndex)
     .unwrap_or_else(|| Vec::new(&env));
+if index.len() > 100 {
+    return Err(SettlementError::GasExhaustionRisk);
+}
 let mut result = Vec::new(&env);
 for address in index.iter() {
     let balance = env
@@ -713,7 +717,46 @@ for address in index.iter() {
         balance,
     });
 }
-result
+Ok(result)
+```
+
+#### New paginated query `get_developer_balances_page`
+
+```rust
+pub fn get_developer_balances_page(
+    env: Env,
+    caller: Address,
+    start: u32,
+    limit: u32,
+) -> Result<Vec<DeveloperBalance>, SettlementError> {
+    let inst = env.storage().instance();
+    let index: Vec<Address> = inst
+        .get(&StorageKey::DeveloperIndex)
+        .unwrap_or_else(|| Vec::new(&env));
+    let end = start
+        .saturating_add(limit.min(50))
+        .min(index.len());
+    let mut result = Vec::new(&env);
+    let mut cursor = 0;
+    for address in index.iter() {
+        if cursor >= start && cursor < end {
+            let balance = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::DeveloperBalance(address.clone()))
+                .unwrap_or(0);
+            result.push_back(DeveloperBalance {
+                address: address.clone(),
+                balance,
+            });
+        }
+        if cursor >= end {
+            break;
+        }
+        cursor += 1;
+    }
+    Ok(result)
+}
 ```
 
 #### Changes to `init`
@@ -735,7 +778,8 @@ inst.set(&StorageKey::DeveloperIndex, &empty_index);
 #### Breaking Changes
 - **Contract Upgrade Required**: This is a storage-level migration that requires a contract upgrade
 - **Data Migration**: Existing developer balances in the old `Map<Address, i128>` format need to be migrated to the new persistent storage format
-- **API Compatibility**: Public API remains unchanged (`receive_payment`, `get_developer_balance`, `get_all_developer_balances`)
+- **API Compatibility**: `receive_payment` and `get_developer_balance` remain unchanged; `get_all_developer_balances` now returns an explicit `Result` and rejects full iteration once the developer index exceeds 100 entries
+- **New Safe Query**: `get_developer_balances_page(start, limit)` is added for paginated admin reads and is capped at 50 records per call
 
 #### Performance Improvements
 - **Developer Credit**: O(1) point read/write instead of O(n) map operations
