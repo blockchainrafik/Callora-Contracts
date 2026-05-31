@@ -494,7 +494,8 @@ impl CalloraSettlement {
     /// - **Order guarantees**: Based on insertion order (first credit = first in index)
     ///
     /// # Returns
-    /// Vec of DeveloperBalance records. Iteration order is based on index insertion order.
+    /// Result containing a Vec of DeveloperBalance records or a gas exhaustion error.
+    /// Iteration order is based on index insertion order.
     ///
     /// # Use Cases
     /// ✅ Administrative dashboards and reporting
@@ -508,7 +509,10 @@ impl CalloraSettlement {
     /// - 50 developers: ~500 gas
     /// - 100 developers: ~1,000 gas
     /// - 500 developers: ~5,000 gas (consider off-chain indexing)
-    pub fn get_all_developer_balances(env: Env, caller: Address) -> Vec<DeveloperBalance> {
+    pub fn get_all_developer_balances(
+        env: Env,
+        caller: Address,
+    ) -> Result<Vec<DeveloperBalance>, SettlementError> {
         caller.require_auth();
         let admin = Self::get_admin(env.clone());
         if caller != admin {
@@ -532,7 +536,58 @@ impl CalloraSettlement {
                 balance,
             });
         }
-        result
+        Ok(result)
+    }
+
+    /// Get a paginated slice of developer balances (admin only).
+    ///
+    /// This method avoids expensive full-index iteration by returning
+    /// a bounded window of developer balance records. Use it for
+    /// admin dashboards and off-chain pagination.
+    pub fn get_developer_balances_page(
+        env: Env,
+        caller: Address,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<DeveloperBalance>, SettlementError> {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            panic!("unauthorized: caller is not admin");
+        }
+
+        let inst = env.storage().instance();
+        let index: Vec<Address> = inst
+            .get(&StorageKey::DeveloperIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if limit == 0 || start >= index.len() {
+            return Ok(Vec::new(&env));
+        }
+
+        let end = start
+            .saturating_add(limit.min(MAX_DEVELOPER_BALANCES_PAGE_SIZE))
+            .min(index.len());
+        let mut result = Vec::new(&env);
+        let mut cursor = 0;
+        for address in index.iter() {
+            if cursor >= start && cursor < end {
+                let balance = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::DeveloperBalance(address.clone()))
+                    .unwrap_or(0);
+                result.push_back(DeveloperBalance {
+                    address: address.clone(),
+                    balance,
+                });
+            }
+            if cursor >= end {
+                break;
+            }
+            cursor += 1;
+        }
+        Ok(result)
     }
 
     /// Return the pending admin address, or `None` if no transfer is in progress.

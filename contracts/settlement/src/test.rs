@@ -53,7 +53,7 @@ mod settlement_tests {
         assert_eq!(global_pool.total_balance, 0);
         assert_eq!(global_pool.last_updated, 1_700_000_000);
 
-        let all_balances = client.get_all_developer_balances(&admin);
+        let all_balances = client.try_get_all_developer_balances(&admin).unwrap();
         assert_eq!(all_balances.len(), 0);
         assert_eq!(client.get_developer_balance(&developer), 0);
     }
@@ -187,7 +187,7 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
 
-        let all = client.get_all_developer_balances(&admin);
+        let all = client.try_get_all_developer_balances(&admin).unwrap();
         assert_eq!(all.len(), 0);
     }
 
@@ -372,7 +372,7 @@ mod settlement_tests {
         client.receive_payment(&vault, &200i128, &false, &Some(dev2.clone()));
         client.receive_payment(&vault, &150i128, &false, &Some(dev1.clone()));
 
-        let all = client.get_all_developer_balances(&admin);
+        let all = client.try_get_all_developer_balances(&admin).unwrap();
         assert_eq!(all.len(), 2);
         let mut dev1_seen = false;
         let mut dev2_seen = false;
@@ -401,8 +401,73 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
 
-        let all = client.get_all_developer_balances(&admin);
+        let all = client.try_get_all_developer_balances(&admin).unwrap();
         assert_eq!(all.len(), 0);
+    }
+
+    #[test]
+    fn test_get_developer_balances_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let dev1 = Address::generate(&env);
+        let dev2 = Address::generate(&env);
+        let dev3 = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        client.receive_payment(&vault, &100i128, &false, &Some(dev1.clone()));
+        client.receive_payment(&vault, &200i128, &false, &Some(dev2.clone()));
+        client.receive_payment(&vault, &300i128, &false, &Some(dev3.clone()));
+
+        let page = client
+            .try_get_developer_balances_page(&admin, &1u32, &2u32)
+            .unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get(0).unwrap().address, dev2);
+        assert_eq!(page.get(1).unwrap().address, dev3);
+    }
+
+    #[test]
+    fn test_get_developer_balances_page_respects_limit_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        for _ in 0..51 {
+            let developer = Address::generate(&env);
+            client.receive_payment(&vault, &1i128, &false, &Some(developer));
+        }
+
+        let page = client
+            .try_get_developer_balances_page(&admin, &0u32, &100u32)
+            .unwrap();
+        assert_eq!(page.len(), 50);
+    }
+
+    #[test]
+    fn test_get_all_developer_balances_rejects_large_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        for _ in 0..101 {
+            let developer = Address::generate(&env);
+            client.receive_payment(&vault, &1i128, &false, &Some(developer));
+        }
+
+        let result = client.try_get_all_developer_balances(&admin);
+        assert_eq!(result, Err(crate::SettlementError::GasExhaustionRisk));
     }
 
     #[test]
@@ -1167,7 +1232,7 @@ mod settlement_tests {
         assert_eq!(client.get_developer_balance(&developer), 500i128);
 
         // Admin can still view all balances
-        let all_balances = client.get_all_developer_balances(&new_admin);
+        let all_balances = client.try_get_all_developer_balances(&new_admin).unwrap();
         assert_eq!(all_balances.len(), 1);
         assert_eq!(all_balances.get(0).unwrap().balance, 500i128);
     }
@@ -1390,7 +1455,7 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
 
         // Admin can call
-        client.get_all_developer_balances(&admin);
+        client.try_get_all_developer_balances(&admin).unwrap();
 
         // Vault cannot call
         let result = client.try_get_all_developer_balances(&vault);
