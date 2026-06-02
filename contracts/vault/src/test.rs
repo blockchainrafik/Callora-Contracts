@@ -1,9 +1,11 @@
 extern crate std;
 
 use soroban_sdk::testutils::{Address as _, Events as _};
-use soroban_sdk::{token, Address, Env, IntoVal, String, Symbol};
+use soroban_sdk::{token, Address, Env, IntoVal, String, Symbol, TryFromVal};
 
 use super::*;
+
+use callora_settlement::CalloraSettlement;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -24,6 +26,15 @@ fn create_vault(env: &Env) -> (Address, CalloraVaultClient<'_>) {
     let address = env.register(CalloraVault, ());
     let client = CalloraVaultClient::new(env, &address);
     (address, client)
+}
+
+/// Register and initialize the settlement contract.
+fn create_settlement(env: &Env, admin: &Address, vault_address: &Address) -> Address {
+    let settlement_address = env.register(CalloraSettlement, ());
+    let settlement_client = callora_settlement::CalloraSettlementClient::new(env, &settlement_address);
+    env.mock_all_auths();
+    settlement_client.init(admin, vault_address);
+    settlement_address
 }
 
 /// Mint `amount` USDC directly to `vault_address` (simulates pre-funded vault).
@@ -745,10 +756,10 @@ fn set_authorized_caller_sets_and_emits_event() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 200);
     client.init(&owner, &usdc, &Some(200), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
-    client.set_authorized_caller(&owner, &Some(new_caller.clone()));
+    client.set_authorized_caller(&Some(new_caller.clone()));
 
     let events = env.events().all();
     let ev = events.last().expect("expected set_authorized_caller event");
@@ -777,7 +788,7 @@ fn deduct_reduces_balance() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 300);
     client.init(&owner, &usdc, &Some(300), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     let returned = client.deduct(&owner, &50, &None);
@@ -795,7 +806,7 @@ fn deduct_with_request_id() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 1000);
     client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     let remaining = client.deduct(&owner, &100, &Some(Symbol::new(&env, "req123")));
@@ -827,7 +838,7 @@ fn deduct_exact_balance_succeeds() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 75);
     client.init(&owner, &usdc, &Some(75), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     let remaining = client.deduct(&owner, &75, &None);
@@ -845,7 +856,7 @@ fn deduct_event_contains_request_id() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 500);
     client.init(&owner, &usdc, &Some(500), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     let request_id = Symbol::new(&env, "api_call_42");
@@ -900,10 +911,10 @@ fn deduct_authorized_caller_succeeds() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let authorized = Address::generate(&env);
-    let (_, client) = create_vault(&env);
+    let (vault_address, client) = create_vault(&env);
     let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
     env.mock_all_auths();
-    fund_vault(&usdc_admin, &client.address, 1000);
+    fund_vault(&usdc_admin, &vault_address, 1000);
     client.init(
         &owner,
         &usdc,
@@ -913,7 +924,7 @@ fn deduct_authorized_caller_succeeds() {
         &None,
         &None,
     );
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     let remaining = client.deduct(&authorized, &100, &None);
     assert_eq!(remaining, 900);
@@ -943,7 +954,7 @@ fn deduct_event_no_request_id_uses_empty_symbol() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 300);
     client.init(&owner, &usdc, &Some(300), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     client.deduct(&owner, &100, &None);
 
@@ -1034,7 +1045,7 @@ fn batch_deduct_multiple_items() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 1000);
     client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     let items = soroban_sdk::vec![
@@ -1068,7 +1079,7 @@ fn batch_deduct_events_contain_request_ids() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 1000);
     client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     let rid_a = Symbol::new(&env, "batch_a");
@@ -1266,8 +1277,8 @@ fn batch_deduct_fail_mid_batch_has_no_transfer_or_deduct_events() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let caller = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &owner);
 
     env.mock_all_auths();
@@ -2120,7 +2131,7 @@ fn vault_full_lifecycle() {
     assert_eq!(client.get_admin(), owner);
 
     // Configure settlement address (precondition for deduct/batch_deduct)
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     // Allow depositor and deposit 200
@@ -2234,8 +2245,8 @@ fn deduct_with_settlement_transfers_usdc() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let caller = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &owner);
 
     env.mock_all_auths();
@@ -2299,8 +2310,8 @@ fn batch_deduct_with_settlement_transfers_total_usdc() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let caller = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &owner);
 
     env.mock_all_auths();
@@ -2488,7 +2499,7 @@ fn get_revenue_pool_consistent_after_deduct_operations() {
         &Some(revenue_pool.clone()),
         &None,
     );
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     // Query revenue pool before deduct
@@ -2628,9 +2639,9 @@ fn deduct_routes_to_settlement_when_both_configured() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let caller = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let revenue_pool = Address::generate(&env);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &owner);
 
     env.mock_all_auths();
@@ -2797,8 +2808,8 @@ fn get_settlement_consistent_after_deduct_operations() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let caller = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &owner);
 
     env.mock_all_auths();
@@ -2887,7 +2898,7 @@ fn test_set_authorized_caller() {
     env.mock_all_auths();
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
 
-    client.set_authorized_caller(&owner, &Some(auth_caller.clone()));
+    client.set_authorized_caller(&Some(auth_caller.clone()));
     let meta = client.get_meta();
     assert_eq!(meta.authorized_caller, Some(auth_caller));
 }
@@ -2906,7 +2917,7 @@ fn set_authorized_caller_non_owner_fails() {
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
 
     // Attempt to set authorized caller as non-owner
-    client.set_authorized_caller(&non_owner, &Some(new_caller));
+    client.set_authorized_caller(&Some(new_caller));
 }
 
 #[test]
@@ -2921,7 +2932,7 @@ fn set_authorized_caller_vault_address_fails() {
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
 
     // Attempt to set vault itself as authorized caller
-    client.set_authorized_caller(&owner, &Some(vault_address));
+    client.set_authorized_caller(&Some(vault_address));
 }
 
 #[test]
@@ -2936,12 +2947,12 @@ fn set_authorized_caller_clear_succeeds() {
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
 
     // Set authorized caller
-    client.set_authorized_caller(&owner, &Some(auth_caller.clone()));
+    client.set_authorized_caller(&Some(auth_caller.clone()));
     let meta = client.get_meta();
     assert_eq!(meta.authorized_caller, Some(auth_caller));
 
     // Clear authorized caller
-    client.set_authorized_caller(&owner, &None);
+    client.set_authorized_caller(&None);
     let meta2 = client.get_meta();
     assert_eq!(meta2.authorized_caller, None);
 }
@@ -2950,8 +2961,8 @@ fn set_authorized_caller_clear_succeeds() {
 fn test_deduct_with_settlement_success() {
     let env = Env::default();
     let owner = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &owner);
 
     env.mock_all_auths();
@@ -3026,7 +3037,7 @@ fn deduct_to_zero_succeeds() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 500);
     client.init(&owner, &usdc, &Some(500), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     assert_eq!(client.deduct(&owner, &500, &None), 0);
@@ -3072,7 +3083,7 @@ fn batch_deduct_to_zero_succeeds() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 0);
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     usdc_admin.mint(&owner, &600);
     usdc_client.approve(&owner, &vault_address, &600, &1000);
@@ -3555,7 +3566,7 @@ fn deduct_while_paused_fails() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 500);
     client.init(&owner, &usdc, &Some(500), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     client.pause(&owner);
     client.deduct(&owner, &100, &None);
@@ -3571,7 +3582,7 @@ fn batch_deduct_while_paused_fails() {
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, 500);
     client.init(&owner, &usdc, &Some(500), &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     client.pause(&owner);
     let items = soroban_sdk::vec![
@@ -4153,7 +4164,7 @@ mod fuzz {
             &None,
             &Some(200),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0x5eed_0001);
@@ -4202,7 +4213,7 @@ mod fuzz {
             &None,
             &Some(max_d),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0x5eed_0002);
@@ -4281,7 +4292,7 @@ mod fuzz {
             &None,
             &Some(max_d),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0xA1B2_C3D4);
@@ -4345,7 +4356,7 @@ mod fuzz {
             &None,
             &Some(max_d),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0xB3C4_D5E6);
@@ -4436,7 +4447,7 @@ mod fuzz {
             &None,
             &Some(max_d),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0xC5D6_E7F8);
@@ -4534,7 +4545,7 @@ mod fuzz {
             &None,
             &Some(max_d),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0xD7E8_F901);
@@ -4629,7 +4640,7 @@ mod fuzz {
             &None,
             &Some(1), // max_deduct = 1
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0xE9FA_0B1C);
@@ -4688,7 +4699,7 @@ mod fuzz {
             &None,
             &Some(max_d),
         );
-        let settlement = Address::generate(&env);
+        let settlement = create_settlement(&env, &owner, &vault_addr);
         client.set_settlement(&owner, &settlement);
 
         let mut rng = StdRng::seed_from_u64(0xF1A2_B3C4);
@@ -4889,7 +4900,7 @@ fn deduct_equal_to_max_deduct_succeeds() {
     fund_vault(&usdc_admin, &vault_address, 500);
     // max_deduct = 100, deposit 200 so balance is sufficient
     client.init(&owner, &usdc, &Some(500), &None, &None, &None, &Some(100));
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     usdc_admin.mint(&owner, &200);
     usdc_client.approve(&owner, &vault_address, &200, &1000);
@@ -4926,7 +4937,7 @@ fn deduct_default_cap_is_i128_max() {
     fund_vault(&usdc_admin, &vault_address, 0);
     // no max_deduct supplied — default cap (i128::MAX) applies
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     usdc_admin.mint(&owner, &1_000_000);
     usdc_client.approve(&owner, &vault_address, &1_000_000, &1000);
@@ -4946,7 +4957,7 @@ fn batch_deduct_each_item_constrained_by_max_deduct() {
     fund_vault(&usdc_admin, &vault_address, 0);
     // max_deduct = 50
     client.init(&owner, &usdc, &None, &None, &None, &None, &Some(50));
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
     usdc_admin.mint(&owner, &300);
     usdc_client.approve(&owner, &vault_address, &300, &1000);
@@ -5210,9 +5221,9 @@ fn instance_ttl_extended_on_deduct_and_batch_deduct() {
 
     let env = Env::default();
     let owner = Address::generate(&env);
-    let settlement = Address::generate(&env);
     let (usdc, usdc_client, usdc_admin) = create_usdc(&env, &owner);
     let (vault_address, client) = create_vault(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
 
     env.mock_all_auths();
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
@@ -5395,7 +5406,7 @@ fn test_reentry_protection_single_deduct() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5453,7 +5464,7 @@ fn test_reentry_protection_batch_deduct() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5517,7 +5528,7 @@ fn test_reentry_success_preserves_accounting() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5559,7 +5570,9 @@ fn test_nested_reentry_protection() {
     env.mock_all_auths();
 
     vault_client.init(&owner, &token_addr, &Some(1000), &None, &None, &None, &None);
-    vault_client.set_settlement(&owner, &Address::generate(&env));
+    let settlement = create_settlement(&env, &owner, &vault_address);
+
+    vault_client.set_settlement(&owner, &settlement);
 
     let token_client = MaliciousTokenClient::new(&env, &token_addr);
     // Try to re-enter 3 times, each deducting 100.
@@ -5601,7 +5614,7 @@ fn test_reentry_exact_balance_exhaustion() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5647,7 +5660,7 @@ fn test_reentry_near_zero_balance() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5695,7 +5708,7 @@ fn test_reentry_multiple_recipients_batch() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5757,7 +5770,7 @@ fn test_reentry_callback_after_partial_batch() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5814,7 +5827,7 @@ fn test_reentry_repeated_attempts() {
         &None,
     );
 
-    let settlement = Address::generate(&env);
+    let settlement = create_settlement(&env, &owner, &vault_address);
     vault_client.set_settlement(&owner, &settlement);
 
     let malicious_client = MaliciousTokenClient::new(&env, &malicious_token_addr);
@@ -5997,12 +6010,12 @@ impl BudgetSnapshot {
     /// Capture the current budget state from the environment.
     fn capture(env: &Env) -> Self {
         let ce = env.cost_estimate();
-        let budget = ce.budget();
+        let res = ce.resources();
         Self {
-            cpu_instructions: budget.get_cpu_insns_consumed().unwrap_or_default(),
-            memory_bytes: budget.get_mem_bytes_consumed().unwrap_or_default(),
-            ledger_read_bytes: ce.resources().read_bytes as u64,
-            ledger_write_bytes: ce.resources().write_bytes as u64,
+            cpu_instructions: res.instructions as u64,
+            memory_bytes: res.mem_bytes as u64,
+            ledger_read_bytes: res.read_bytes as u64,
+            ledger_write_bytes: res.write_bytes as u64,
         }
     }
 
@@ -6026,7 +6039,7 @@ fn setup_vault_for_deduct(env: &Env, initial_balance: i128) -> (Address, Callora
     env.mock_all_auths();
     fund_vault(&usdc_admin, &vault_address, initial_balance);
     client.init(&owner, &usdc, &Some(initial_balance), &None, &None, &None, &None);
-    let settlement = Address::generate(env);
+    let settlement = create_settlement(env, &owner, &vault_address);
     client.set_settlement(&owner, &settlement);
 
     (owner, client)
