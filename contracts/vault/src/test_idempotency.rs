@@ -15,6 +15,8 @@ use soroban_sdk::{token, Address, Env, Symbol};
 
 use super::*;
 
+use callora_settlement::CalloraSettlement;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -38,6 +40,14 @@ fn create_vault(env: &Env) -> (Address, CalloraVaultClient<'_>) {
     (addr, client)
 }
 
+/// Register and initialize the settlement contract.
+fn create_settlement(env: &Env, admin: &Address, vault_address: &Address) -> Address {
+    let settlement_address = env.register(CalloraSettlement, ());
+    let settlement_client = callora_settlement::CalloraSettlementClient::new(env, &settlement_address);
+    settlement_client.init(admin, vault_address);
+    settlement_address
+}
+
 /// Set up a vault with `balance` USDC, a settlement address, and return
 /// `(vault_addr, client, settlement_addr, owner)`.
 fn setup_vault(env: &Env, balance: i128) -> (Address, CalloraVaultClient<'_>, Address, Address) {
@@ -47,7 +57,7 @@ fn setup_vault(env: &Env, balance: i128) -> (Address, CalloraVaultClient<'_>, Ad
     let (usdc, _, usdc_admin) = create_usdc(env, &owner);
     usdc_admin.mint(&vault_addr, &balance);
     client.init(&owner, &usdc, &Some(balance), &None, &None, &None, &None);
-    let settlement = Address::generate(env);
+    let settlement = create_settlement(env, &owner, &vault_addr);
     client.set_settlement(&owner, &settlement);
     (vault_addr, client, settlement, owner)
 }

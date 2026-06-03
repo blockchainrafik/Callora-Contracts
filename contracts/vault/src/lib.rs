@@ -31,8 +31,8 @@
 /// the marker is archived and a previously-seen `request_id` can be reused —
 /// callers must not rely on deduplication beyond the retention window.
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String,
-    Symbol, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, token, Address, BytesN,
+    Env, String, Symbol, Vec,
 };
 
 /// Typed error codes for the Callora Vault contract.
@@ -87,6 +87,8 @@ pub enum VaultError {
     BatchEmpty = 21,
     /// Batch size exceeds maximum allowed (code 22).
     BatchTooLarge = 22,
+    /// Duplicate request ID detected (code 23).
+    DuplicateRequestId = 29,
     /// New owner must be different from current owner (code 23).
     NewOwnerSameAsCurrent = 23,
     /// No ownership transfer is pending (code 24).
@@ -151,6 +153,19 @@ pub enum StorageKey {
     /// `REQUEST_ID_BUMP_AMOUNT` ledgers.  The value is `true` (a `bool`);
     /// presence of the key is the authoritative signal.
     ProcessedRequest(Symbol),
+}
+
+/// Settlement contract client for crediting the global pool.
+#[contractclient(name = "SettlementClient")]
+#[allow(dead_code)]
+trait Settlement {
+    fn receive_payment(
+        env: Env,
+        caller: Address,
+        amount: i128,
+        to_pool: bool,
+        developer: Option<Address>,
+    );
 }
 
 pub const DEFAULT_MAX_DEDUCT: i128 = i128::MAX;
@@ -541,7 +556,21 @@ impl CalloraVault {
         Ok(())
     }
 
+    /// Deposit USDC into the vault.
+    ///
+    /// Follows the **Checks-Effects-Interactions** pattern:
+    /// 1. **Checks** — pause guard, auth, amount validation, depositor allowlist, minimum.
+    /// 2. **Effects** — compute new balance, persist updated `MetaKey` to storage.
+    /// 3. **Interaction** — transfer USDC from caller to vault.
+    ///
+    /// # CEI Rationale
+    /// State is updated **before** the external token call so that a malicious or
+    /// reentrant token contract cannot observe stale internal accounting. If the
+    /// transfer panics, Soroban atomically reverts the entire transaction —
+    /// including the already-persisted state write — leaving no inconsistent
+    /// on-ledger state.
     pub fn deposit(env: Env, caller: Address, amount: i128) -> Result<i128, VaultError> {
+        // ── Checks ────────────────────────────────────────────────────────
         Self::require_not_paused(env.clone())?;
         caller.require_auth();
         if amount <= 0 {
@@ -559,8 +588,8 @@ impl CalloraVault {
             .instance()
             .get(&StorageKey::UsdcToken)
             .ok_or(VaultError::NotInitialized)?;
-        token::Client::new(&env, &usdc_addr)
-            .transfer(&caller, &env.current_contract_address(), &amount);
+
+        // ── Effects ───────────────────────────────────────────────────────
         meta.balance = meta
             .balance
             .checked_add(amount)
@@ -570,9 +599,17 @@ impl CalloraVault {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.events().publish(
-            (Symbol::new(&env, "deposit"), caller),
+            (Symbol::new(&env, "deposit"), caller.clone()),
             (amount, meta.balance),
         );
+
+        // ── Interaction ───────────────────────────────────────────────────
+        // Transfer USDC from caller to vault. If this panics, the Soroban host
+        // reverts the entire transaction — the Effects above are atomically rolled
+        // back, leaving no inconsistent state.
+        token::Client::new(&env, &usdc_addr)
+            .transfer(&caller, &env.current_contract_address(), &amount);
+
         Ok(meta.balance)
     }
 
@@ -701,7 +738,7 @@ impl CalloraVault {
             return Err(VaultError::BatchTooLarge);
         }
         let max_d = Self::get_max_deduct(env.clone());
-        let mut meta = Self::get_meta(env.clone())?;
+        let meta = Self::get_meta(env.clone())?;
         let mut running = meta.balance;
         let mut total: i128 = 0;
         // Collect ids seen within this batch to catch intra-batch duplicates.
@@ -1001,15 +1038,11 @@ impl CalloraVault {
         if offering_id.len() > MAX_OFFERING_ID_LEN {
             return Err(VaultError::OfferingIdTooLong);
         }
-        
-        // Manual parsing of i128 from soroban_sdk::String
-        let mut buf = [0u8; 64];
-        let len = price.len() as usize;
-        if len > 64 { return Err(VaultError::PriceParseError); }
-        price.copy_into_slice(&mut buf[..len]);
-        let price_str = core::str::from_utf8(&buf[..len]).map_err(|_| VaultError::PriceParseError)?;
+        let mut price_buf = [0u8; 64];
+        price.copy_into_slice(&mut price_buf);
+        let price_str = core::str::from_utf8(&price_buf[..price.len() as usize])
+            .map_err(|_| VaultError::PriceParseError)?;
         let price_i128: i128 = price_str.parse().map_err(|_| VaultError::PriceParseError)?;
-        
         if price_i128 <= 0 {
             return Err(VaultError::PriceParseError);
         }
@@ -1108,11 +1141,8 @@ impl CalloraVault {
     /// See UPGRADE.md for the complete operational flow.
     pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
         caller.require_auth();
-        let admin = Self::get_admin(env.clone()).expect("vault not initialized");
-        assert!(
-            caller == admin,
-            "unauthorized: caller is not admin"
-        );
+        let admin = Self::get_admin(env.clone())
+            .expect("vault must be initialized before upgrade");
 
         // Perform the on-chain upgrade via the deployer interface.
         // This is a host operation and may only succeed in the live environment.

@@ -1,9 +1,12 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, Symbol, Vec};
 
 /// Maximum number of items allowed in a single `batch_receive_payment` call.
 pub const MAX_BATCH_SIZE: u32 = 50;
+
+/// Maximum number of developer balances returned per page in paginated queries.
+pub const MAX_DEVELOPER_BALANCES_PAGE_SIZE: u32 = 100;
 
 /// Typed errors for the settlement contract.
 ///
@@ -42,9 +45,6 @@ pub enum SettlementError {
     DeveloperBalanceUnderflow    = 11,
     InsufficientContractBalance  = 12,
 }
-
-/// Maximum number of items accepted by `batch_receive_payment`.
-pub const MAX_BATCH_SIZE: u32 = 50;
 
 /// Persistent storage keys for settlement contract
 #[contracttype]
@@ -348,7 +348,7 @@ impl CalloraSettlement {
             let mut index: Vec<Address> = inst
                 .get(&StorageKey::DeveloperIndex)
                 .unwrap_or_else(|| Vec::new(&env));
-            if !index.iter().any(|a| a == &dev) {
+            if !index.iter().any(|a| a == dev) {
                 index.push_back(dev.clone());
                 inst.set(&StorageKey::DeveloperIndex, &index);
             }
