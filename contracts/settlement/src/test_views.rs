@@ -1,9 +1,24 @@
-use crate::{CalloraSettlement, CalloraSettlementClient, SettlementError};
+use crate::{CalloraSettlement, CalloraSettlementClient, DeveloperBalance, SettlementError};
 use soroban_sdk::{testutils::Address as _, Address, Env, InvokeError};
 
-fn is_not_initialized(result: Result<impl core::fmt::Debug, InvokeError>) -> bool {
+/// Matches when the contract panics with NotInitialized.
+/// Works for both Result-returning and non-Result-returning functions.
+fn is_not_initialized<T, U>(result: Result<Result<T, U>, Result<soroban_sdk::Error, InvokeError>>) -> bool {
     match result {
-        Err(InvokeError::Contract(code)) => code == SettlementError::NotInitialized as u32,
+        // Non-Result function path: error decoded as Error in Ok slot
+        Err(Ok(err)) => err.is_type(soroban_sdk::xdr::ScErrorType::Contract)
+            && err.get_code() == SettlementError::NotInitialized as u32,
+        // Result-returning function path: InvokeError
+        Err(Err(InvokeError::Contract(code))) => code == SettlementError::NotInitialized as u32,
+        _ => false,
+    }
+}
+
+/// For get_all_developer_balances which returns Result<Vec, SettlementError>.
+fn is_not_initialized_result(result: Result<Result<soroban_sdk::Vec<DeveloperBalance>, soroban_sdk::ConversionError>, Result<SettlementError, InvokeError>>) -> bool {
+    match result {
+        Err(Ok(SettlementError::NotInitialized)) => true,
+        Err(Err(InvokeError::Contract(code))) => code == SettlementError::NotInitialized as u32,
         _ => false,
     }
 }
@@ -54,7 +69,7 @@ fn test_get_all_developer_balances_uninitialized() {
     let dummy = Address::generate(&env);
 
     // get_all_developer_balances calls get_admin internally, which returns NotInitialized
-    assert!(is_not_initialized(
+    assert!(is_not_initialized_result(
         client.try_get_all_developer_balances(&dummy)
     ));
 }

@@ -28,6 +28,8 @@ pub const MAX_DEVELOPER_BALANCES_PAGE_SIZE: u32 = 100;
 /// | 10   | InsufficientDeveloperBalance | Developer balance is less than withdrawal amount  |
 /// | 11   | DeveloperBalanceUnderflow    | Developer balance subtraction would overflow      |
 /// | 12   | InsufficientContractBalance  | Settlement contract lacks on-ledger USDC          |
+/// | 13   | AssetNotConfigured           | Asset not registered via `add_asset`              |
+/// | 14   | GasExhaustionRisk            | Developer index too large for gas-efficient query |
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
@@ -44,6 +46,8 @@ pub enum SettlementError {
     InsufficientDeveloperBalance = 10,
     DeveloperBalanceUnderflow    = 11,
     InsufficientContractBalance  = 12,
+    AssetNotConfigured            = 13,
+    GasExhaustionRisk             = 14,
 }
 
 /// Persistent storage keys for settlement contract
@@ -56,7 +60,10 @@ pub enum StorageKey {
     PendingVault,
     DeveloperIndex,
     DeveloperBalance(Address),
+    DeveloperBalanceByAsset(Address, Address),
     GlobalPool,
+    GlobalPoolByAsset(Address),
+    SupportedAssets,
     Usdc,
 }
 
@@ -435,6 +442,312 @@ impl CalloraSettlement {
             .ok_or(SettlementError::UsdcTokenNotConfigured)
     }
 
+    /// Register a new supported asset token.
+    ///
+    /// Once registered, `receive_payment_asset` and related functions
+    /// will accept payments in this asset. The old single-asset path
+    /// (`receive_payment`) always uses the USDC configured via `set_usdc_token`.
+    ///
+    /// # Arguments
+    /// * `caller` — Must be the current admin.
+    /// * `asset` — Address of the token contract to register.
+    ///
+    /// # Panics
+    /// * If caller is not the admin.
+    /// * If the asset has already been registered.
+    pub fn add_asset(env: Env, caller: Address, asset: Address) {
+        caller.require_auth();
+        let current_admin = Self::get_admin(env.clone());
+        if caller != current_admin {
+            env.panic_with_error(SettlementError::Unauthorized);
+        }
+        if asset == env.current_contract_address() {
+            panic!("invalid config: asset cannot be the contract itself");
+        }
+        let inst = env.storage().instance();
+        let mut assets: Vec<Address> = inst
+            .get(&StorageKey::SupportedAssets)
+            .unwrap_or_else(|| Vec::new(&env));
+        if assets.iter().any(|a| a == asset) {
+            panic!("asset already registered");
+        }
+        assets.push_back(asset.clone());
+        inst.set(&StorageKey::SupportedAssets, &assets);
+        // Initialize per-asset global pool
+        let pool = GlobalPool {
+            total_balance: 0,
+            last_updated: env.ledger().timestamp(),
+        };
+        inst.set(&StorageKey::GlobalPoolByAsset(asset), &pool);
+    }
+
+    /// Return the list of all registered asset token addresses.
+    pub fn get_assets(env: Env) -> Vec<Address> {
+        if !env.storage().instance().has(&StorageKey::Admin) {
+            env.panic_with_error(SettlementError::NotInitialized);
+        }
+        env.storage()
+            .instance()
+            .get(&StorageKey::SupportedAssets)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    fn require_asset_configured(env: &Env, asset: &Address) {
+        let assets: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::SupportedAssets)
+            .unwrap_or_else(|| Vec::new(env));
+        if !assets.iter().any(|a| a == *asset) {
+            env.panic_with_error(SettlementError::AssetNotConfigured);
+        }
+    }
+
+    /// Receive payment in a specific asset and credit to pool or developer balance.
+    ///
+    /// This is the multi-asset counterpart of `receive_payment`. It works
+    /// identically but accepts an explicit `asset` token address.
+    ///
+    /// # Arguments
+    /// * `caller` — Must be authorized vault address or admin.
+    /// * `asset` — Token contract address (must have been registered via `add_asset`).
+    /// * `amount` — Payment amount in asset micro-units; must be > 0.
+    /// * `to_pool` — If true, credit global pool; if false, credit a specific developer.
+    /// * `developer` — Required when `to_pool=false`; ignored when `to_pool=true`.
+    pub fn receive_payment_asset(
+        env: Env,
+        caller: Address,
+        asset: Address,
+        amount: i128,
+        to_pool: bool,
+        developer: Option<Address>,
+    ) {
+        caller.require_auth();
+        Self::require_authorized_caller(env.clone(), caller.clone());
+        if amount <= 0 {
+            env.panic_with_error(SettlementError::AmountNotPositive);
+        }
+        Self::require_asset_configured(&env, &asset);
+        let inst = env.storage().instance();
+        if to_pool {
+            if developer.is_some() {
+                env.panic_with_error(SettlementError::DeveloperMustBeNone);
+            }
+            let mut pool: GlobalPool = inst
+                .get(&StorageKey::GlobalPoolByAsset(asset.clone()))
+                .unwrap_or_else(|| {
+                    let gp = GlobalPool {
+                        total_balance: 0,
+                        last_updated: env.ledger().timestamp(),
+                    };
+                    gp
+                });
+            pool.total_balance = pool
+                .total_balance
+                .checked_add(amount)
+                .unwrap_or_else(|| env.panic_with_error(SettlementError::PoolOverflow));
+            pool.last_updated = env.ledger().timestamp();
+            inst.set(&StorageKey::GlobalPoolByAsset(asset.clone()), &pool);
+            env.events().publish(
+                (Symbol::new(&env, "payment_received"), caller.clone(), asset.clone()),
+                PaymentReceivedEvent {
+                    from_vault: caller.clone(),
+                    amount,
+                    to_pool: true,
+                    developer: None,
+                },
+            );
+        } else {
+            let dev_address = developer
+                .unwrap_or_else(|| env.panic_with_error(SettlementError::DeveloperRequired));
+
+            let current_balance: i128 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::DeveloperBalanceByAsset(
+                    asset.clone(),
+                    dev_address.clone(),
+                ))
+                .unwrap_or(0i128);
+            let new_balance = current_balance
+                .checked_add(amount)
+                .unwrap_or_else(|| env.panic_with_error(SettlementError::DeveloperOverflow));
+
+            env.storage().persistent().set(
+                &StorageKey::DeveloperBalanceByAsset(asset.clone(), dev_address.clone()),
+                &new_balance,
+            );
+            env.storage().persistent().extend_ttl(
+                &StorageKey::DeveloperBalanceByAsset(asset.clone(), dev_address.clone()),
+                50000,
+                50000,
+            );
+
+            let mut index: Vec<Address> = inst
+                .get(&StorageKey::DeveloperIndex)
+                .unwrap_or_else(|| Vec::new(&env));
+            if !index.iter().any(|addr| addr == dev_address) {
+                index.push_back(dev_address.clone());
+                inst.set(&StorageKey::DeveloperIndex, &index);
+            }
+
+            env.events().publish(
+                (Symbol::new(&env, "payment_received"), caller.clone(), asset.clone()),
+                PaymentReceivedEvent {
+                    from_vault: caller.clone(),
+                    amount,
+                    to_pool: false,
+                    developer: Some(dev_address.clone()),
+                },
+            );
+            env.events().publish(
+                (Symbol::new(&env, "balance_credited"), dev_address.clone()),
+                BalanceCreditedEvent {
+                    developer: dev_address,
+                    amount,
+                    new_balance,
+                },
+            );
+        }
+    }
+
+    /// Get developer balance for a specific asset.
+    ///
+    /// Returns 0 if the developer has no balance for this asset.
+    pub fn get_developer_balance_asset(env: Env, developer: Address, asset: Address) -> i128 {
+        if !env.storage().instance().has(&StorageKey::Admin) {
+            env.panic_with_error(SettlementError::NotInitialized);
+        }
+        env.storage()
+            .persistent()
+            .get(&StorageKey::DeveloperBalanceByAsset(asset, developer))
+            .unwrap_or(0)
+    }
+
+    /// Get global pool information for a specific asset.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if contract is not initialized.
+    /// * `AssetNotConfigured` if the asset has not been registered.
+    pub fn get_global_pool_asset(env: Env, asset: Address) -> GlobalPool {
+        if !env.storage().instance().has(&StorageKey::Admin) {
+            env.panic_with_error(SettlementError::NotInitialized);
+        }
+        Self::require_asset_configured(&env, &asset);
+        env.storage()
+            .instance()
+            .get(&StorageKey::GlobalPoolByAsset(asset))
+            .unwrap_or_else(|| env.panic_with_error(SettlementError::AssetNotConfigured))
+    }
+
+    /// Get all developer balances for a specific asset (admin only).
+    ///
+    /// Iterates over the registered developer index and collects per-asset balances.
+    /// Returns `Err(GasExhaustionRisk)` if the index exceeds 100 entries.
+    pub fn get_all_developer_balances_asset(
+        env: Env,
+        caller: Address,
+        asset: Address,
+    ) -> Result<Vec<DeveloperBalance>, SettlementError> {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            env.panic_with_error(SettlementError::Unauthorized);
+        }
+        Self::require_asset_configured(&env, &asset);
+        let inst = env.storage().instance();
+        let index: Vec<Address> = inst
+            .get(&StorageKey::DeveloperIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+        if index.len() > 100 {
+            return Err(SettlementError::GasExhaustionRisk);
+        }
+        let mut result = Vec::new(&env);
+        for address in index.iter() {
+            let balance: i128 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::DeveloperBalanceByAsset(
+                    asset.clone(),
+                    address.clone(),
+                ))
+                .unwrap_or(0i128);
+            result.push_back(DeveloperBalance {
+                address: address.clone(),
+                balance,
+            });
+        }
+        Ok(result)
+    }
+
+    /// Withdraw developer balance in a specific asset.
+    ///
+    /// Requires the developer to authorize and the requested amount
+    /// to be positive and covered by the tracked developer balance for this asset.
+    pub fn withdraw_developer_balance_asset(
+        env: Env,
+        developer: Address,
+        asset: Address,
+        amount: i128,
+    ) -> Result<(), SettlementError> {
+        developer.require_auth();
+        if amount <= 0 {
+            return Err(SettlementError::AmountNotPositive);
+        }
+        Self::require_asset_configured(&env, &asset);
+
+        let current_balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::DeveloperBalanceByAsset(
+                asset.clone(),
+                developer.clone(),
+            ))
+            .unwrap_or(0);
+        if amount > current_balance {
+            return Err(SettlementError::InsufficientDeveloperBalance);
+        }
+
+        let new_balance = current_balance
+            .checked_sub(amount)
+            .ok_or(SettlementError::DeveloperBalanceUnderflow)?;
+
+        let usdc_address = Self::get_usdc_token(env.clone())?;
+        let usdc = token::Client::new(&env, &usdc_address);
+        let contract_address = env.current_contract_address();
+
+        if usdc.balance(&contract_address) < amount {
+            return Err(SettlementError::InsufficientContractBalance);
+        }
+
+        usdc.transfer(&contract_address, &developer, &amount);
+
+        env.storage()
+            .persistent()
+            .set(
+                &StorageKey::DeveloperBalanceByAsset(asset.clone(), developer.clone()),
+                &new_balance,
+            );
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &StorageKey::DeveloperBalanceByAsset(asset.clone(), developer.clone()),
+                50000,
+                50000,
+            );
+
+        env.events().publish(
+            (Symbol::new(&env, "developer_withdraw"), developer.clone()),
+            DeveloperWithdrawEvent {
+                developer,
+                amount,
+                remaining_balance: new_balance,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Withdraw developer balance as USDC to the requesting developer.
     ///
     /// Requires the developer to authorize the request and the requested amount
@@ -540,6 +853,9 @@ impl CalloraSettlement {
             .get(&StorageKey::DeveloperIndex)
             .unwrap_or_else(|| Vec::new(&env));
 
+        if index.len() > 100 {
+            return Err(SettlementError::GasExhaustionRisk);
+        }
         let mut result = Vec::new(&env);
         for address in index.iter() {
             let address_key = address.clone();
