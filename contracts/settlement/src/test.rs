@@ -57,7 +57,10 @@ mod settlement_tests {
         assert_eq!(global_pool.total_balance, 0);
         assert_eq!(global_pool.last_updated, 1_700_000_000);
 
-        let all_balances = client.try_get_all_developer_balances(&admin).unwrap().unwrap();
+        let all_balances = client
+            .try_get_all_developer_balances(&admin)
+            .unwrap()
+            .unwrap();
         assert_eq!(all_balances.len(), 0);
         assert_eq!(client.get_developer_balance(&developer), 0);
     }
@@ -191,7 +194,10 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
 
-        let all = client.try_get_all_developer_balances(&admin).unwrap().unwrap();
+        let all = client
+            .try_get_all_developer_balances(&admin)
+            .unwrap()
+            .unwrap();
         assert_eq!(all.len(), 0);
     }
 
@@ -382,7 +388,10 @@ mod settlement_tests {
         client.receive_payment(&vault, &200i128, &false, &Some(dev2.clone()));
         client.receive_payment(&vault, &150i128, &false, &Some(dev1.clone()));
 
-        let all = client.try_get_all_developer_balances(&admin).unwrap().unwrap();
+        let all = client
+            .try_get_all_developer_balances(&admin)
+            .unwrap()
+            .unwrap();
         assert_eq!(all.len(), 2);
         let mut dev1_seen = false;
         let mut dev2_seen = false;
@@ -411,7 +420,10 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
 
-        let all = client.try_get_all_developer_balances(&admin).unwrap().unwrap();
+        let all = client
+            .try_get_all_developer_balances(&admin)
+            .unwrap()
+            .unwrap();
         assert_eq!(all.len(), 0);
     }
 
@@ -478,7 +490,10 @@ mod settlement_tests {
             client.receive_payment(&vault, &1i128, &false, &Some(developer));
         }
 
-        let result = client.try_get_all_developer_balances(&admin).unwrap().unwrap();
+        let result = client
+            .try_get_all_developer_balances(&admin)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.len(), 101);
     }
 
@@ -1050,7 +1065,11 @@ mod settlement_tests {
                 assert!(result.is_ok(), "expected success for case: {}", case.name);
                 assert_eq!(client.get_global_pool().total_balance, 100i128);
             } else {
-                assert!(result.is_err(), "expected Unauthorized for case: {}", case.name);
+                assert!(
+                    result.is_err(),
+                    "expected Unauthorized for case: {}",
+                    case.name
+                );
             }
         }
     }
@@ -1250,7 +1269,10 @@ mod settlement_tests {
         assert_eq!(client.get_developer_balance(&developer), 500i128);
 
         // Admin can still view all balances
-        let all_balances = client.try_get_all_developer_balances(&new_admin).unwrap().unwrap();
+        let all_balances = client
+            .try_get_all_developer_balances(&new_admin)
+            .unwrap()
+            .unwrap();
         assert_eq!(all_balances.len(), 1);
         assert_eq!(all_balances.get(0).unwrap().balance, 500i128);
     }
@@ -1465,7 +1487,10 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
 
         // Admin can call
-        client.try_get_all_developer_balances(&admin).unwrap().unwrap();
+        client
+            .try_get_all_developer_balances(&admin)
+            .unwrap()
+            .unwrap();
 
         // Vault cannot call
         let result = client.try_get_all_developer_balances(&vault);
