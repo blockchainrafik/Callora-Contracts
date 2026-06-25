@@ -1,9 +1,28 @@
 use crate::{CalloraSettlement, CalloraSettlementClient, SettlementError};
 use soroban_sdk::{testutils::Address as _, Address, Env, InvokeError};
 
-fn is_not_initialized(result: Result<impl core::fmt::Debug, InvokeError>) -> bool {
+trait ErrorCodeEq {
+    fn code_eq(&self, expected: SettlementError) -> bool;
+}
+
+impl ErrorCodeEq for soroban_sdk::Error {
+    fn code_eq(&self, expected: SettlementError) -> bool {
+        *self == soroban_sdk::Error::from_contract_error(expected as u32)
+    }
+}
+
+impl ErrorCodeEq for SettlementError {
+    fn code_eq(&self, expected: SettlementError) -> bool {
+        *self == expected
+    }
+}
+
+fn is_not_initialized<T, C, E: ErrorCodeEq>(
+    result: Result<Result<T, C>, Result<E, InvokeError>>,
+) -> bool {
     match result {
-        Err(InvokeError::Contract(code)) => code == SettlementError::NotInitialized as u32,
+        Err(Ok(err)) => err.code_eq(SettlementError::NotInitialized),
+        Err(Err(InvokeError::Contract(code))) => code == SettlementError::NotInitialized as u32,
         _ => false,
     }
 }

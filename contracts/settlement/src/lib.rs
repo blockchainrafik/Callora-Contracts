@@ -1,12 +1,19 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, Env, Symbol, Vec,
+};
 
 /// Maximum number of items allowed in a single `batch_receive_payment` call.
 pub const MAX_BATCH_SIZE: u32 = 50;
 
 /// Maximum number of developer balances returned per page in paginated queries.
-pub const MAX_DEVELOPER_BALANCES_PAGE_SIZE: u32 = 100;
+pub const MAX_DEVELOPER_BALANCES_PAGE_SIZE: u32 = 50;
+
+/// Maximum developer index size for which `get_all_developer_balances` will fully
+/// iterate. Beyond this, callers must use `get_developer_balances_page` to avoid
+/// excessive gas costs from unbounded iteration.
+pub const MAX_DEVELOPER_INDEX_FOR_FULL_QUERY: u32 = 100;
 
 /// Typed errors for the settlement contract.
 ///
@@ -28,22 +35,24 @@ pub const MAX_DEVELOPER_BALANCES_PAGE_SIZE: u32 = 100;
 /// | 10   | InsufficientDeveloperBalance | Developer balance is less than withdrawal amount  |
 /// | 11   | DeveloperBalanceUnderflow    | Developer balance subtraction would overflow      |
 /// | 12   | InsufficientContractBalance  | Settlement contract lacks on-ledger USDC          |
+/// | 13   | GasExhaustionRisk            | Developer index too large for full unpaginated query |
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 pub enum SettlementError {
-    NotInitialized               = 1,
-    AlreadyInitialized           = 2,
-    Unauthorized                 = 3,
-    AmountNotPositive            = 4,
-    DeveloperRequired            = 5,
-    DeveloperMustBeNone          = 6,
-    PoolOverflow                 = 7,
-    DeveloperOverflow            = 8,
-    UsdcTokenNotConfigured       = 9,
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
+    Unauthorized = 3,
+    AmountNotPositive = 4,
+    DeveloperRequired = 5,
+    DeveloperMustBeNone = 6,
+    PoolOverflow = 7,
+    DeveloperOverflow = 8,
+    UsdcTokenNotConfigured = 9,
     InsufficientDeveloperBalance = 10,
-    DeveloperBalanceUnderflow    = 11,
-    InsufficientContractBalance  = 12,
+    DeveloperBalanceUnderflow = 11,
+    InsufficientContractBalance = 12,
+    GasExhaustionRisk = 13,
 }
 
 /// Persistent storage keys for settlement contract
@@ -127,7 +136,6 @@ pub struct DeveloperWithdrawEvent {
     pub amount: i128,
     pub remaining_balance: i128,
 }
-
 
 #[contract]
 pub struct CalloraSettlement;
@@ -245,7 +253,7 @@ impl CalloraSettlement {
             let new_balance = current_balance
                 .checked_add(amount)
                 .unwrap_or_else(|| env.panic_with_error(SettlementError::DeveloperOverflow));
-            
+
             // Write to persistent storage with TTL extension
             env.storage().persistent().set(
                 &StorageKey::DeveloperBalance(dev_address.clone()),
@@ -341,9 +349,11 @@ impl CalloraSettlement {
             env.storage()
                 .persistent()
                 .set(&StorageKey::DeveloperBalance(dev.clone()), &new_balance);
-            env.storage()
-                .persistent()
-                .extend_ttl(&StorageKey::DeveloperBalance(dev.clone()), 50000, 50000);
+            env.storage().persistent().extend_ttl(
+                &StorageKey::DeveloperBalance(dev.clone()),
+                50000,
+                50000,
+            );
             // Add to index if not already present
             let mut index: Vec<Address> = inst
                 .get(&StorageKey::DeveloperIndex)
@@ -356,7 +366,7 @@ impl CalloraSettlement {
                 (Symbol::new(&env, "balance_credited"), dev.clone()),
                 BalanceCreditedEvent {
                     developer: dev.clone(),
-                    amount: amount,
+                    amount,
                     new_balance,
                 },
             );
@@ -472,12 +482,15 @@ impl CalloraSettlement {
 
         usdc.transfer(&contract_address, &developer, &amount);
 
-        env.storage()
-            .persistent()
-            .set(&StorageKey::DeveloperBalance(developer.clone()), &new_balance);
-        env.storage()
-            .persistent()
-            .extend_ttl(&StorageKey::DeveloperBalance(developer.clone()), 50000, 50000);
+        env.storage().persistent().set(
+            &StorageKey::DeveloperBalance(developer.clone()),
+            &new_balance,
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::DeveloperBalance(developer.clone()),
+            50000,
+            50000,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "developer_withdraw"), developer.clone()),
@@ -540,6 +553,10 @@ impl CalloraSettlement {
             .get(&StorageKey::DeveloperIndex)
             .unwrap_or_else(|| Vec::new(&env));
 
+        if index.len() > MAX_DEVELOPER_INDEX_FOR_FULL_QUERY {
+            return Err(SettlementError::GasExhaustionRisk);
+        }
+
         let mut result = Vec::new(&env);
         for address in index.iter() {
             let address_key = address.clone();
@@ -586,9 +603,12 @@ impl CalloraSettlement {
             .saturating_add(limit.min(MAX_DEVELOPER_BALANCES_PAGE_SIZE))
             .min(index.len());
         let mut result = Vec::new(&env);
-        let mut cursor = 0;
-        for address in index.iter() {
-            if cursor >= start && cursor < end {
+        for (cursor, address) in index.iter().enumerate() {
+            let cursor = cursor as u32;
+            if cursor >= end {
+                break;
+            }
+            if cursor >= start {
                 let balance = env
                     .storage()
                     .persistent()
@@ -599,10 +619,6 @@ impl CalloraSettlement {
                     balance,
                 });
             }
-            if cursor >= end {
-                break;
-            }
-            cursor += 1;
         }
         Ok(result)
     }
@@ -615,9 +631,7 @@ impl CalloraSettlement {
     /// # Returns
     /// `Some(Address)` of the nominated admin, or `None` when no transfer is pending.
     pub fn get_pending_admin(env: Env) -> Option<Address> {
-        env.storage()
-            .instance()
-            .get(&StorageKey::PendingAdmin)
+        env.storage().instance().get(&StorageKey::PendingAdmin)
     }
 
     /// Nominate a new admin (admin only).
