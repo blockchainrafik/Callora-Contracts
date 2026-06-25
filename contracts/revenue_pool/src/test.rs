@@ -1598,6 +1598,54 @@ fn receive_payment_event_from_vault_false() {
     assert!(!from_vault);
 }
 
+/// Conformance test: verify receive_payment event shape matches
+/// EVENT_SCHEMA.md exactly: topics=["receive_payment", caller],
+/// data=(amount: i128, from_vault: bool) with amount first, from_vault second.
+#[test]
+fn receive_payment_event_shape_conformance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = create_pool(&env);
+    let (usdc, _, _) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc);
+    client.receive_payment(&admin, &7_777_000, &true);
+
+    let events = env.events().all();
+    // events: init + receive_payment = 2
+    let ev = events.last().unwrap();
+
+    // ── Topic assertions ──
+    assert_eq!(ev.1.len(), 2, "receive_payment must have exactly 2 topics");
+
+    let t0: Symbol = ev.1.get(0).unwrap().into_val(&env);
+    assert_eq!(t0, Symbol::new(&env, "receive_payment"),
+        "topic[0] must be Symbol(\"receive_payment\")");
+
+    let t1: Address = ev.1.get(1).unwrap().into_val(&env);
+    assert_eq!(t1, admin,
+        "topic[1] must be the caller/admin address");
+
+    // ── Data assertion: canonical shape (amount, from_vault) ──
+    let (amount, from_vault): (i128, bool) = ev.2.clone().into_val(&env);
+    assert_eq!(amount, 7_777_000,
+        "data[0] must be amount (i128) — first field");
+    assert!(from_vault,
+        "data[1] must be from_vault (bool) — second field");
+
+    // ── Also verify from_vault=false event ──
+    client.receive_payment(&admin, &3_333_000, &false);
+    let events = env.events().all();
+    let ev = events.last().unwrap();
+
+    let (amount, from_vault): (i128, bool) = ev.2.clone().into_val(&env);
+    assert_eq!(amount, 3_333_000,
+        "data[0] must be amount (i128) — first field");
+    assert!(!from_vault,
+        "data[1] must be from_vault (bool) — second field");
+}
+
 #[test]
 fn distribute_event_topics_and_data() {
     let env = Env::default();
