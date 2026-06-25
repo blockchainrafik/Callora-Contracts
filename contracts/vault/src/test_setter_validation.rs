@@ -1,7 +1,7 @@
 extern crate std;
+use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::{token, Address, Env, IntoVal, String, Symbol};
-use super::*;
 
 fn create_usdc<'a>(env: &'a Env, admin: &'a Address) -> (Address, token::StellarAssetClient<'a>) {
     let ca = env.register_stellar_asset_contract_v2(admin.clone());
@@ -9,12 +9,12 @@ fn create_usdc<'a>(env: &'a Env, admin: &'a Address) -> (Address, token::Stellar
     (addr.clone(), token::StellarAssetClient::new(env, &addr))
 }
 
-fn create_vault(env: &Env) -> (Address, CalloraVaultClient) {
+fn create_vault(env: &Env) -> (Address, CalloraVaultClient<'_>) {
     let addr = env.register(CalloraVault, ());
     (addr.clone(), CalloraVaultClient::new(env, &addr))
 }
 
-fn setup(env: &Env) -> (Address, CalloraVaultClient, Address, Address) {
+fn setup(env: &Env) -> (Address, CalloraVaultClient<'_>, Address, Address) {
     env.mock_all_auths();
     let admin = Address::generate(env);
     let (vault_addr, client) = create_vault(env);
@@ -28,32 +28,48 @@ fn set_price_offering_id_too_long() {
     let env = Env::default();
     let (_, client, _, admin) = setup(&env);
     let long_id = "a".repeat((MAX_OFFERING_ID_LEN + 1) as usize);
-    client.set_price(&admin, &String::from_str(&env, &long_id), &String::from_str(&env, "100"));
+    let result = client.try_set_price(
+        &admin,
+        &String::from_str(&env, &long_id),
+        &String::from_str(&env, "100"),
+    );
+    assert!(result.is_err());
 }
 
 #[test]
 fn set_price_zero_price() {
     let env = Env::default();
     let (_, client, _, admin) = setup(&env);
-    client.set_price(&admin, &String::from_str(&env, "off1"), &String::from_str(&env, "0"));
+    let result = client.try_set_price(
+        &admin,
+        &String::from_str(&env, "off1"),
+        &String::from_str(&env, "0"),
+    );
+    assert!(result.is_err());
 }
 
 #[test]
 fn set_price_successful() {
     let env = Env::default();
     let (_, client, _, admin) = setup(&env);
-    client.set_price(&admin, &String::from_str(&env, "off1"), &String::from_str(&env, "1000"));
-    // Verify readback
-    let stored = client.get_price(&String::from_str(&env, "off1"));
-    assert_eq!(stored, Some(String::from_str(&env, "1000")));
-    // Verify event emitted (using try call to capture events)
+    client.set_price(
+        &admin,
+        &String::from_str(&env, "off1"),
+        &String::from_str(&env, "1000"),
+    );
+    // Verify event emitted. Must check immediately after the call that emits
+    // it — `env.events().all()` only retains events from the most recent
+    // top-level invocation, so a later `get_price()` call would clear it.
     let events = env.events().all();
-    // Find price_set event
     let price_set = events.iter().find(|e| {
         let s: Symbol = e.1.get(0).unwrap().into_val(&env);
         s == Symbol::new(&env, "price_set")
     });
     assert!(price_set.is_some(), "price_set event not emitted");
+
+    // Verify readback
+    let stored = client.get_price(&String::from_str(&env, "off1"));
+    assert_eq!(stored, Some(String::from_str(&env, "1000")));
 }
 
 #[test]
