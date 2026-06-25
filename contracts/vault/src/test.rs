@@ -5866,6 +5866,9 @@ fn upgrade_requires_admin() {
     // Non-admin attempt should fail
     let res = client.try_upgrade(&attacker, &new_hash);
     assert!(res.is_err(), "non-admin should not be able to upgrade");
+
+    // The rejected attempt must not have mutated the version marker.
+    assert_eq!(client.version(), None);
 }
 
 #[test]
@@ -5967,6 +5970,20 @@ fn version_returns_none_before_first_upgrade() {
     client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
 
     assert_eq!(client.version(), None);
+}
+
+#[test]
+fn upgrade_before_init_fails_with_not_initialized() {
+    let env = Env::default();
+    let caller = Address::generate(&env);
+    let (_vault_address, client) = create_vault(&env);
+
+    env.mock_all_auths();
+    let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    // Calling upgrade before init must return a typed error, not panic.
+    let res = client.try_upgrade(&caller, &new_hash);
+    assert!(res.is_err(), "upgrade before init should fail");
 }
 
 #[test]

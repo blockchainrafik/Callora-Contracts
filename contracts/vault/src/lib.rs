@@ -1116,8 +1116,9 @@ impl CalloraVault {
     /// - `caller` — must be the vault admin; signature required.
     /// - `new_wasm_hash` — 32-byte hash of the new WASM code to deploy.
     ///
-    /// # Panics
-    /// - `"unauthorized: caller is not admin"` — `caller` is not the admin.
+    /// # Errors
+    /// - [`VaultError::NotInitialized`] — vault has not been initialized yet.
+    /// - [`VaultError::Unauthorized`] — `caller` is not the current admin.
     ///
     /// # Events
     /// Emits an `upgraded` event with the admin as topic and the new WASM hash as data.
@@ -1126,10 +1127,12 @@ impl CalloraVault {
     /// After calling `upgrade`, you may need to invoke a separate `migrate` function
     /// (if implemented in the new WASM) to update storage schema or perform data migrations.
     /// See UPGRADE.md for the complete operational flow.
-    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), VaultError> {
         caller.require_auth();
-        let admin = Self::get_admin(env.clone())
-            .expect("vault must be initialized before upgrade");
+        let admin = Self::get_admin(env.clone())?;
+        if caller != admin {
+            return Err(VaultError::Unauthorized);
+        }
 
         // Perform the on-chain upgrade via the deployer interface.
         // This is a host operation and may only succeed in the live environment.
@@ -1143,6 +1146,7 @@ impl CalloraVault {
         // Emit an event for indexers / audit logs.
         env.events()
             .publish((Symbol::new(&env, "upgraded"), admin), new_wasm_hash);
+        Ok(())
     }
 
     /// Read the stored contract version (WASM hash) as last set by `upgrade`.
