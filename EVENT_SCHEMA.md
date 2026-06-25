@@ -858,3 +858,230 @@ Emitted by `set_vault()` when the admin updates the registered vault address.
 | 0.0.1   | revenue-pool  | Full revenue pool event suite with JSON examples             |
 | 0.0.1   | revenue-pool  | Added `admin_changed` event on `set_admin` for explicit old/new admin intent |
 | 0.1.0   | settlement    | `payment_received`, `balance_credited`                       |
+
+---
+
+### `allowlist_add`
+
+Emitted when the owner adds an address to the depositor allowlist.
+
+| Index   | Location | Type    | Description              |
+|---------|----------|---------|--------------------------|
+| topic 0 | topics   | Symbol  | `"allowlist_add"`        |
+| topic 1 | topics   | Address | caller (owner)           |
+| topic 2 | topics   | Address | depositor being added    |
+| data    | data     | ()      | empty                    |
+
+```json
+{
+  "topics": ["allowlist_add", "GOWNER...", "GDEPOSITOR..."],
+  "data": null
+}
+```
+
+**Indexer note:** If the address was already in the list, the event is still emitted
+but the list is unchanged (no duplicates are stored).
+
+---
+
+### `allowlist_clear`
+
+Emitted when the owner wipes the entire depositor allowlist.
+
+| Index   | Location | Type    | Description      |
+|---------|----------|---------|------------------|
+| topic 0 | topics   | Symbol  | `"allowlist_clear"` |
+| topic 1 | topics   | Address | caller (owner)   |
+| data    | data     | ()      | empty            |
+
+```json
+{
+  "topics": ["allowlist_clear", "GOWNER..."],
+  "data": null
+}
+```
+
+**Indexer note:** After this event, `get_allowlist()` returns an empty list.
+All previously allowed depositor addresses must be re-added via `add_address()`.
+
+---
+
+### `price_set`
+
+Emitted when the owner sets or updates the price for an offering.
+
+| Index   | Location | Type    | Description                        |
+|---------|-----------|---------|------------------------------------|
+| topic 0 | topics   | Symbol  | `"price_set"`                      |
+| topic 1 | topics   | Address | caller (owner)                     |
+| topic 2 | topics   | String  | `offering_id`                      |
+| data    | data     | String  | price as a decimal string (i128)   |
+
+```json
+{
+  "topics": ["price_set", "GOWNER...", "offering-001"],
+  "data": "5000000"
+}
+```
+
+**Encoding note:** The price is stored and emitted as a UTF-8 decimal string
+representing a positive `i128` integer in USDC micro-units. A value of `"0"` or
+negative is rejected before the event is emitted.
+
+---
+
+### `upgraded`
+
+Emitted when the admin upgrades the contract WASM via `upgrade()`.
+Emitted by both the vault and revenue pool contracts.
+
+| Index   | Location | Type        | Description                        |
+|---------|----------|-------------|------------------------------------|
+| topic 0 | topics   | Symbol      | `"upgraded"`                       |
+| topic 1 | topics   | Address     | `admin` — address that triggered the upgrade |
+| data    | data     | BytesN<32>  | new WASM hash installed on-chain   |
+
+```json
+{
+  "topics": ["upgraded", "GADMIN..."],
+  "data": "<32-byte WASM hash as hex>"
+}
+```
+
+**Indexer note:** The emitted hash matches what `version()` returns immediately
+after the upgrade. Indexers can use this event to track contract version history
+without querying ledger state.
+
+---
+
+## Contract: `callora-revenue-pool` — additional events
+
+### `pause_set`
+
+Emitted by both `pause()` and `unpause()`. The boolean data field distinguishes
+the two cases, making this a single unified event for pause state changes.
+
+| Index   | Location | Type    | Description                            |
+|---------|----------|---------|----------------------------------------|
+| topic 0 | topics   | Symbol  | `"pause_set"`                          |
+| topic 1 | topics   | Address | `caller` — admin who changed the state |
+| data    | data     | bool    | `true` = paused, `false` = unpaused    |
+
+```json
+{ "topics": ["pause_set", "GADMIN..."], "data": true }
+```
+
+```json
+{ "topics": ["pause_set", "GADMIN..."], "data": false }
+```
+
+**Indexer note:** After `data = true`, `distribute()` and `batch_distribute()`
+are blocked. After `data = false`, all operations are restored.
+Calling `pause()` when already paused, or `unpause()` when not paused, panics
+before the event is emitted.
+
+---
+
+## Contract: `callora-settlement` — additional events
+
+### `developer_withdraw`
+
+Emitted when a developer withdraws their accrued balance from the settlement contract.
+
+| Index              | Location | Type    | Description                                    |
+|--------------------|----------|---------|------------------------------------------------|
+| topic 0            | topics   | Symbol  | `"developer_withdraw"`                         |
+| topic 1            | topics   | Address | `developer` — address initiating the withdrawal |
+| `developer`        | data     | Address | same as topic 1; duplicated for data-only indexers |
+| `amount`           | data     | i128    | amount withdrawn in USDC micro-units           |
+| `remaining_balance`| data     | i128    | developer's balance after the withdrawal       |
+
+```json
+{
+  "topics": ["developer_withdraw", "GDEV..."],
+  "data": {
+    "developer": "GDEV...",
+    "amount": 2500000,
+    "remaining_balance": 1000000
+  }
+}
+```
+
+**Invariant:** `remaining_balance = prior_balance − amount`. The USDC transfer
+to `developer` has already succeeded by the time this event is emitted — the
+funds have left the contract.
+
+---
+
+### `vault_proposed`
+
+Emitted when the admin proposes a new vault address via `propose_vault()`.
+This begins a two-step vault rotation; the vault is not active until
+`vault_accepted` is emitted.
+
+| Index            | Location | Type    | Description                              |
+|------------------|----------|---------|------------------------------------------|
+| topic 0          | topics   | Symbol  | `"vault_proposed"`                       |
+| topic 1          | topics   | Address | `caller` — admin who initiated the proposal |
+| `current_vault`  | data     | Address | the vault address currently registered   |
+| `proposed_vault` | data     | Address | the new vault address pending acceptance |
+
+```json
+{
+  "topics": ["vault_proposed", "GADMIN..."],
+  "data": {
+    "current_vault": "GOLDVAULT...",
+    "proposed_vault": "GNEWVAULT..."
+  }
+}
+```
+
+**Indexer note:** Until `vault_accepted` is observed, `current_vault` remains
+the active vault for `receive_payment()` authorization. Index this event to
+monitor pending rotations.
+
+---
+
+### `vault_accepted`
+
+Emitted when the pending vault (or admin) accepts the proposed vault rotation
+via `accept_vault()`. After this event the new vault is the only address
+authorized to call `receive_payment()`.
+
+| Index        | Location | Type    | Description                                         |
+|--------------|----------|---------|-----------------------------------------------------|
+| topic 0      | topics   | Symbol  | `"vault_accepted"`                                  |
+| topic 1      | topics   | Address | `caller` — pending vault or admin who accepted      |
+| `old_vault`  | data     | Address | vault address that was previously active            |
+| `new_vault`  | data     | Address | vault address now active                            |
+| `accepted_by`| data     | Address | same as topic 1; duplicated for data-only indexers  |
+
+```json
+{
+  "topics": ["vault_accepted", "GNEWVAULT..."],
+  "data": {
+    "old_vault": "GOLDVAULT...",
+    "new_vault": "GNEWVAULT...",
+    "accepted_by": "GNEWVAULT..."
+  }
+}
+```
+
+**Indexer note:** After this event, update any cached vault address used for
+payment-source filtering. `vault_proposed` + `vault_accepted` always appear as
+a pair across two separate transactions.
+
+| `allowlist_add`          | vault           | `add_address()`                              |
+| `allowlist_clear`        | vault           | `clear_all()`                                |
+| `price_set`              | vault           | `set_price()`                                |
+| `upgraded`               | vault, revenue-pool | `upgrade()`                             |
+| `pause_set`              | revenue-pool    | `pause()` / `unpause()`                      |
+| `developer_withdraw`     | settlement      | `developer_withdraw()`                       |
+| `vault_proposed`         | settlement      | `propose_vault()`                            |
+| `vault_accepted`         | settlement      | `accept_vault()`                             |
+
+| 0.0.1   | vault         | Added `allowlist_add`, `allowlist_clear` events for depositor allowlist management |
+| 0.0.1   | vault         | Added `price_set` event on `set_price()` for offering price tracking |
+| 0.0.1   | vault         | Added `upgraded` event on `upgrade()` for WASM version audit trail |
+| 0.0.1   | revenue-pool  | Added `pause_set` event (unified pause/unpause) with boolean data field |
+| 0.1.0   | settlement    | Added `developer_withdraw`, `vault_proposed`, `vault_accepted` events |
