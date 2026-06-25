@@ -9,12 +9,12 @@ fn create_usdc<'a>(env: &'a Env, admin: &'a Address) -> (Address, token::Stellar
     (addr.clone(), token::StellarAssetClient::new(env, &addr))
 }
 
-fn create_vault(env: &Env) -> (Address, CalloraVaultClient) {
+fn create_vault(env: &Env) -> (Address, CalloraVaultClient<'_>) {
     let addr = env.register(CalloraVault, ());
     (addr.clone(), CalloraVaultClient::new(env, &addr))
 }
 
-fn setup(env: &Env) -> (Address, CalloraVaultClient, Address, Address) {
+fn setup(env: &Env) -> (Address, CalloraVaultClient<'_>, Address, Address) {
     env.mock_all_auths();
     let admin = Address::generate(env);
     let (vault_addr, client) = create_vault(env);

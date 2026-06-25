@@ -124,7 +124,9 @@ impl MaliciousSettlement {
 // Reentrancy Tests
 // ---------------------------------------------------------------------------
 
-fn setup_reentrancy_test(env: &Env) -> (Address, CalloraVaultClient, Address, Address, Address) {
+fn setup_reentrancy_test(
+    env: &Env,
+) -> (Address, CalloraVaultClient<'_>, Address, Address, Address) {
     let owner = Address::generate(env);
     let vault_addr = env.register(CalloraVault, ());
     let vault_client = CalloraVaultClient::new(env, &vault_addr);
