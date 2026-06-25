@@ -28,6 +28,7 @@ pub const MAX_DEVELOPER_BALANCES_PAGE_SIZE: u32 = 100;
 /// | 10   | InsufficientDeveloperBalance | Developer balance is less than withdrawal amount  |
 /// | 11   | DeveloperBalanceUnderflow    | Developer balance subtraction would overflow      |
 /// | 12   | InsufficientContractBalance  | Settlement contract lacks on-ledger USDC          |
+/// | 13   | GasExhaustionRisk            | Index too large for safe full scan; use pagination|
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
@@ -44,6 +45,7 @@ pub enum SettlementError {
     InsufficientDeveloperBalance = 10,
     DeveloperBalanceUnderflow    = 11,
     InsufficientContractBalance  = 12,
+    GasExhaustionRisk            = 13,
 }
 
 /// Persistent storage keys for settlement contract
@@ -259,14 +261,12 @@ impl CalloraSettlement {
                 50000,
             );
 
-            // Add developer to index if not already present
+            // Add developer to index in sorted order if not already present
             let mut index: Vec<Address> = inst
                 .get(&StorageKey::DeveloperIndex)
                 .unwrap_or_else(|| Vec::new(&env));
-            if !index.iter().any(|addr| addr == dev_address) {
-                index.push_back(dev_address.clone());
-                inst.set(&StorageKey::DeveloperIndex, &index);
-            }
+            Self::sorted_insert(&env, &mut index, dev_address.clone());
+            inst.set(&StorageKey::DeveloperIndex, &index);
 
             env.events().publish(
                 (Symbol::new(&env, "payment_received"), caller.clone()),
@@ -344,14 +344,12 @@ impl CalloraSettlement {
             env.storage()
                 .persistent()
                 .extend_ttl(&StorageKey::DeveloperBalance(dev.clone()), 50000, 50000);
-            // Add to index if not already present
+            // Add to index in sorted order if not already present
             let mut index: Vec<Address> = inst
                 .get(&StorageKey::DeveloperIndex)
                 .unwrap_or_else(|| Vec::new(&env));
-            if !index.iter().any(|a| a == dev) {
-                index.push_back(dev.clone());
-                inst.set(&StorageKey::DeveloperIndex, &index);
-            }
+            Self::sorted_insert(&env, &mut index, dev.clone());
+            inst.set(&StorageKey::DeveloperIndex, &index);
             env.events().publish(
                 (Symbol::new(&env, "balance_credited"), dev.clone()),
                 BalanceCreditedEvent {
@@ -540,13 +538,18 @@ impl CalloraSettlement {
             .get(&StorageKey::DeveloperIndex)
             .unwrap_or_else(|| Vec::new(&env));
 
+        // Guard against unbounded iteration on large indexes.
+        // Callers with > 100 developers must use `get_developer_balances_page` instead.
+        if index.len() > MAX_DEVELOPER_BALANCES_PAGE_SIZE {
+            return Err(SettlementError::GasExhaustionRisk);
+        }
+
         let mut result = Vec::new(&env);
         for address in index.iter() {
-            let address_key = address.clone();
             let balance: i128 = env
                 .storage()
                 .persistent()
-                .get(&StorageKey::DeveloperBalance(address_key))
+                .get(&StorageKey::DeveloperBalance(address.clone()))
                 .unwrap_or(0i128);
             result.push_back(DeveloperBalance {
                 address: address.clone(),
@@ -605,6 +608,114 @@ impl CalloraSettlement {
             cursor += 1;
         }
         Ok(result)
+    }
+
+    /// Cursor-based paginated developer balances (admin only).
+    ///
+    /// Returns up to `limit` developer balance records starting **after** the
+    /// supplied `cursor` address (exclusive), or from the beginning of the
+    /// sorted index when `cursor` is `None`.  The index is maintained in
+    /// deterministic ascending order by address bytes, so pages are stable
+    /// across interleaved `receive_payment` calls for developers that sort
+    /// **after** the cursor.
+    ///
+    /// # Arguments
+    /// * `caller`  – Must be the current admin; must authorize.
+    /// * `cursor`  – Exclusive start position.  Pass `None` for the first page;
+    ///               pass the `next_cursor` returned by the previous call for
+    ///               subsequent pages.
+    /// * `limit`   – Maximum records to return; capped at
+    ///               [`MAX_DEVELOPER_BALANCES_PAGE_SIZE`] (100).
+    ///
+    /// # Returns
+    /// `(page, next_cursor)` where:
+    /// * `page`         – Vec of [`DeveloperBalance`] for this page (may be empty).
+    /// * `next_cursor`  – `Some(address)` of the last record returned, which can be
+    ///                    passed as `cursor` on the next call; `None` when this is the
+    ///                    last page.
+    ///
+    /// # Access Control
+    /// Admin only.
+    ///
+    /// # Errors
+    /// * [`SettlementError::NotInitialized`] – contract not yet initialised.
+    /// * [`SettlementError::Unauthorized`]   – caller is not the admin.
+    ///
+    /// # Example
+    /// ```text
+    /// // First page
+    /// let (page1, next) = client.get_developer_balances_cursor(&admin, &None, &10u32);
+    /// // Second page
+    /// let (page2, next) = client.get_developer_balances_cursor(&admin, &next, &10u32);
+    /// ```
+    pub fn get_developer_balances_cursor(
+        env: Env,
+        caller: Address,
+        cursor: Option<Address>,
+        limit: u32,
+    ) -> (Vec<DeveloperBalance>, Option<Address>) {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            env.panic_with_error(SettlementError::Unauthorized);
+        }
+
+        // Cap limit to the maximum safe page size.
+        let effective_limit = if limit == 0 {
+            return (Vec::new(&env), None);
+        } else {
+            limit.min(MAX_DEVELOPER_BALANCES_PAGE_SIZE)
+        };
+
+        let inst = env.storage().instance();
+        let index: Vec<Address> = inst
+            .get(&StorageKey::DeveloperIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut result: Vec<DeveloperBalance> = Vec::new(&env);
+        // When a cursor is supplied we skip addresses up to and including it.
+        // `past_cursor` becomes true once we have consumed the cursor entry (or
+        // immediately when cursor is None).
+        let mut past_cursor = cursor.is_none();
+        let mut last_address: Option<Address> = None;
+
+        for address in index.iter() {
+            if !past_cursor {
+                if let Some(ref c) = cursor {
+                    if &address == c {
+                        // We've reached the cursor entry; start collecting from next.
+                        past_cursor = true;
+                    }
+                }
+                continue;
+            }
+
+            let balance: i128 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::DeveloperBalance(address.clone()))
+                .unwrap_or(0i128);
+            result.push_back(DeveloperBalance {
+                address: address.clone(),
+                balance,
+            });
+            last_address = Some(address.clone());
+
+            if result.len() >= effective_limit {
+                break;
+            }
+        }
+
+        // next_cursor is the address of the last record returned, provided the
+        // page is full (meaning there may be more records).  When the page is
+        // not full we have reached the end of the index.
+        let next_cursor = if result.len() >= effective_limit {
+            last_address
+        } else {
+            None
+        };
+
+        (result, next_cursor)
     }
 
     /// Return the pending admin address, or `None` if no transfer is in progress.
@@ -790,6 +901,34 @@ impl CalloraSettlement {
         if caller != vault && caller != admin {
             env.panic_with_error(SettlementError::Unauthorized);
         }
+    }
+
+    /// Insert `addr` into `index` in sorted order (ascending by raw bytes).
+    ///
+    /// Soroban's `Vec` does not expose a binary-search API, so we do a linear
+    /// scan to find the insertion point.  The index is expected to be small
+    /// (≤ `MAX_DEVELOPER_BALANCES_PAGE_SIZE`), so the O(n) cost is acceptable
+    /// and the result is a deterministic, stable ordering that cursors can rely on.
+    ///
+    /// If `addr` is already present the index is left unchanged.
+    fn sorted_insert(env: &Env, index: &mut Vec<Address>, addr: Address) {
+        // Check for duplicates and find insertion position in one pass.
+        let mut insert_pos: Option<u32> = None;
+        for (i, existing) in index.iter().enumerate() {
+            if existing == addr {
+                // Already in index – nothing to do.
+                return;
+            }
+            if insert_pos.is_none() && addr < existing {
+                insert_pos = Some(i as u32);
+            }
+        }
+
+        match insert_pos {
+            Some(pos) => index.insert(pos, addr),
+            None => index.push_back(addr),
+        }
+        let _ = env; // env available for future use
     }
 }
 
