@@ -1,4 +1,4 @@
-﻿# Event Schema
+# Event Schema
 
 Events emitted by all Callora contracts for indexers, frontends, and auditors.
 All topic/data types refer to Soroban/Stellar XDR values.
@@ -626,6 +626,30 @@ Emitted when the admin updates the per-leg distribution cap.
 
 ---
 
+### `set_min_pool_balance`
+
+Emitted when the admin updates the minimum pool balance floor (Issue #416).
+
+| Index   | Location | Type         | Description                          |
+|---------|----------|--------------|--------------------------------------|
+| topic 0 | topics   | Symbol       | `"set_min_pool_balance"`             |
+| topic 1 | topics   | Address      | admin address                        |
+| data    | data     | (i128, i128) | `(old_min, new_min)` in USDC stroops |
+
+```json
+{
+  "topics": ["set_min_pool_balance", "GADMIN..."],
+  "data": [0, 50000000]
+}
+```
+
+> **Security note:** After this event, any `distribute` or `batch_distribute`
+> call that would leave the pool below `new_min` will abort with
+> `MinPoolBalanceBreached` before any transfer occurs. Set `new_min` to `0`
+> to restore the default (no floor).
+
+---
+
 ### `batch_distribute`
 
 Emitted **once per payment** during a `batch_distribute()` call. If a batch has
@@ -841,6 +865,7 @@ Emitted by `set_vault()` when the admin updates the registered vault address.
 | `admin_transfer_completed`| revenue-pool   | `claim_admin()`                          |
 | `receive_payment`        | revenue-pool    | `receive_payment()`                      |
 | `distribute`             | revenue-pool    | `distribute()`                           |
+| `set_min_pool_balance` | revenue-pool    | `set_min_pool_balance()`                 |
 | `batch_distribute`       | revenue-pool    | each payment in `batch_distribute()`     |
 | `payment_received`       | settlement      | `receive_payment()`                      |
 | `balance_credited`       | settlement      | `receive_payment()` with `to_pool=false` |
@@ -857,4 +882,5 @@ Emitted by `set_vault()` when the admin updates the registered vault address.
 | 0.0.1   | vault         | Added `metadata_removed` event on `remove_metadata()` for stale-entry cleanup |
 | 0.0.1   | revenue-pool  | Full revenue pool event suite with JSON examples             |
 | 0.0.1   | revenue-pool  | Added `admin_changed` event on `set_admin` for explicit old/new admin intent |
+| 0.0.1   | revenue-pool  | Added `set_min_pool_balance` event; floor enforcement on `distribute` + `batch_distribute` (Issue #416) |
 | 0.1.0   | settlement    | `payment_received`, `balance_credited`                       |

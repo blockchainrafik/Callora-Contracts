@@ -17,10 +17,15 @@ const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
 const USDC_KEY: &str = "usdc";
 const MAX_DISTRIBUTE_KEY: &str = "max_distribute";
+/// Storage key for the minimum pool balance floor (Issue #416).
+const MIN_POOL_BALANCE_KEY: &str = "min_pool_bal";
 const ERR_AMOUNT_NOT_POSITIVE: &str = "amount must be positive";
 const ERR_AMOUNT_EXCEEDS_MAX_DISTRIBUTE: &str = "amount exceeds max_distribute";
 const ERR_UNAUTHORIZED: &str = "unauthorized: caller is not admin";
 const ERR_INSUFFICIENT_BALANCE: &str = "insufficient USDC balance";
+/// Emitted when a distribute/batch_distribute call would reduce the pool
+/// balance below the configured `min_pool_balance` floor.
+const ERR_MIN_POOL_BALANCE_BREACHED: &str = "MinPoolBalanceBreached";
 const ERR_NOT_INITIALIZED: &str = "revenue pool not initialized";
 const ERR_DUPLICATE_RECIPIENT: &str = "duplicate recipient in batch";
 const PAUSED_KEY: &str = "paused";
@@ -314,6 +319,61 @@ impl RevenuePool {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Minimum pool balance floor (Issue #416)
+    // -----------------------------------------------------------------------
+
+    /// Return the current minimum pool balance floor.
+    ///
+    /// The pool must retain at least this many USDC base units after every
+    /// `distribute` or `batch_distribute` call. Defaults to `0` when not set,
+    /// which preserves the original behaviour of allowing a full drain.
+    pub fn get_min_pool_balance(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, MIN_POOL_BALANCE_KEY))
+            .unwrap_or(0_i128)
+    }
+
+    /// Set the minimum pool balance floor.
+    ///
+    /// After this call, every `distribute` and `batch_distribute` call will
+    /// abort with `MinPoolBalanceBreached` if the resulting pool balance would
+    /// fall below `amount`.
+    ///
+    /// # Arguments
+    /// * `env` - The environment running the contract.
+    /// * `caller` - Must be the current admin.
+    /// * `amount` - New floor in USDC base units. Must be `>= 0`.
+    ///   Pass `0` to restore the default (no floor).
+    ///
+    /// # Panics
+    /// * If the caller is not the current admin (`"unauthorized: caller is not admin"`).
+    /// * If `amount` is negative (`"min_pool_balance must not be negative"`).
+    ///
+    /// # Events
+    /// Emits `set_min_pool_balance` with `caller` as a topic and
+    /// `(old_min, new_min)` as data.
+    pub fn set_min_pool_balance(env: Env, caller: Address, amount: i128) {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        assert!(amount >= 0, "min_pool_balance must not be negative");
+        let old_min = Self::get_min_pool_balance(env.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, MIN_POOL_BALANCE_KEY), &amount);
+        env.storage()
+            .instance()
+            .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+        env.events().publish(
+            (Symbol::new(&env, "set_min_pool_balance"), admin),
+            (old_min, amount),
+        );
+    }
+
     fn validate_recipient(recipient: &Address, contract_self: &Address) {
         // Rule 1 — no self-distributions (the contract sending to itself is almost
         // certainly a logic bug; if you want to "reclaim" funds use a dedicated fn).
@@ -372,8 +432,15 @@ impl RevenuePool {
             )
         });
 
-        if usdc.balance(&contract_address) < amount {
+        let current_balance = usdc.balance(&contract_address);
+        if current_balance < amount {
             panic!("{}", ERR_INSUFFICIENT_BALANCE);
+        }
+
+        // Floor check: pool must not drop below min_pool_balance after transfer.
+        let floor = Self::get_min_pool_balance(env.clone());
+        if current_balance - amount < floor {
+            panic!("{}", ERR_MIN_POOL_BALANCE_BREACHED);
         }
 
         env.storage()
@@ -514,8 +581,16 @@ impl RevenuePool {
         let usdc = token::Client::new(&env, &usdc_address);
         let contract_address = env.current_contract_address();
 
-        if usdc.balance(&contract_address) < total_amount {
+        let current_balance = usdc.balance(&contract_address);
+        if current_balance < total_amount {
             panic!("{}", ERR_INSUFFICIENT_BALANCE);
+        }
+
+        // Floor check: the entire batch is atomic, so one pre-flight check suffices.
+        // The pool must not drop below min_pool_balance after all transfers complete.
+        let floor = Self::get_min_pool_balance(env.clone());
+        if current_balance - total_amount < floor {
+            panic!("{}", ERR_MIN_POOL_BALANCE_BREACHED);
         }
 
         // Extend TTL before executing transfers.

@@ -158,7 +158,9 @@ fn create_usdc<'a>(
         client.pause(&admin);
         assert!(client.is_paused());
 
-        let result = std::panic::catch_unwind(|| client.distribute(&admin, &developer, &100));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.distribute(&admin, &developer, &100)
+        }));
         assert!(result.is_err());
     }
 
@@ -2230,4 +2232,204 @@ fn batch_distribute_duplicate_detected_before_balance_check() {
     payments.push_back((dev.clone(), 200_i128));
 
     client.batch_distribute(&admin, &payments);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #416 — min_pool_balance floor tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn set_min_pool_balance_admin_only() {
+    // A non-admin caller must be rejected before any state change.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let (_, client) = create_pool(&env);
+    let (usdc, _, _) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc);
+    client.set_min_pool_balance(&attacker, &500);
+}
+
+#[test]
+#[should_panic(expected = "min_pool_balance must not be negative")]
+fn set_min_pool_balance_negative_panics() {
+    // Negative floor values are nonsensical and must be rejected.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = create_pool(&env);
+    let (usdc, _, _) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc);
+    client.set_min_pool_balance(&admin, &-1);
+}
+
+#[test]
+fn set_min_pool_balance_stores_value_and_getter_returns_it() {
+    // Setter persists the value; getter reads it back correctly.
+    // Also verifies the default is 0 (no floor) before any setter call.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = create_pool(&env);
+    let (usdc, _, _) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc);
+
+    // Default floor must be 0.
+    assert_eq!(client.get_min_pool_balance(), 0);
+
+    client.set_min_pool_balance(&admin, &1_000);
+    assert_eq!(client.get_min_pool_balance(), 1_000);
+
+    // Admin can lower it back to 0.
+    client.set_min_pool_balance(&admin, &0);
+    assert_eq!(client.get_min_pool_balance(), 0);
+}
+
+#[test]
+fn set_min_pool_balance_emits_correct_event() {
+    // Event must carry topics (symbol, admin) and data (old_min, new_min).
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = create_pool(&env);
+    let (usdc, _, _) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc);
+    client.set_min_pool_balance(&admin, &2_500);
+
+    let events = env.events().all();
+    let ev = events.last().unwrap();
+
+    // topic 0 = "set_min_pool_balance"
+    let t0 = Symbol::try_from_val(&env, &ev.1.get(0).unwrap()).unwrap();
+    assert_eq!(t0, Symbol::new(&env, "set_min_pool_balance"));
+
+    // topic 1 = admin address
+    let t1 = Address::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
+    assert_eq!(t1, admin);
+
+    // data = (old_min, new_min)
+    let data: (i128, i128) = ev.2.into_val(&env);
+    assert_eq!(data, (0_i128, 2_500_i128));
+}
+
+#[test]
+#[should_panic(expected = "MinPoolBalanceBreached")]
+fn distribute_breaches_floor_panics() {
+    // distribute must abort when the resulting balance would be below the floor.
+    // Pool: 1_000, floor: 600, request: 500 → balance after = 500 < 600 → breach.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let developer = Address::generate(&env);
+    let (pool_addr, client) = create_pool(&env);
+    let (usdc_address, _, usdc_admin) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc_address);
+    fund_pool(&usdc_admin, &pool_addr, 1_000);
+    client.set_min_pool_balance(&admin, &600);
+
+    // 1000 - 500 = 500 < 600 → MinPoolBalanceBreached
+    client.distribute(&admin, &developer, &500);
+}
+
+#[test]
+fn distribute_exact_floor_succeeds() {
+    // Distributing exactly (balance - floor) must succeed (equal is allowed).
+    // Pool: 1_000, floor: 600, request: 400 → balance after = 600 = floor → OK.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let developer = Address::generate(&env);
+    let (pool_addr, client) = create_pool(&env);
+    let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc_address);
+    fund_pool(&usdc_admin, &pool_addr, 1_000);
+    client.set_min_pool_balance(&admin, &600);
+
+    // 1000 - 400 = 600 = floor → should succeed
+    client.distribute(&admin, &developer, &400);
+
+    assert_eq!(usdc_client.balance(&pool_addr), 600);
+    assert_eq!(usdc_client.balance(&developer), 400);
+}
+
+#[test]
+#[should_panic(expected = "MinPoolBalanceBreached")]
+fn batch_distribute_breaches_floor_panics() {
+    // batch_distribute must abort when the total payout would breach the floor.
+    // Pool: 1_000, floor: 400, batch total: 700 → balance after = 300 < 400 → breach.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let dev1 = Address::generate(&env);
+    let dev2 = Address::generate(&env);
+    let (pool_addr, client) = create_pool(&env);
+    let (usdc_address, _, usdc_admin) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc_address);
+    fund_pool(&usdc_admin, &pool_addr, 1_000);
+    client.set_min_pool_balance(&admin, &400);
+
+    let mut payments: Vec<(Address, i128)> = Vec::new(&env);
+    payments.push_back((dev1.clone(), 400_i128));
+    payments.push_back((dev2.clone(), 300_i128)); // total 700; 1000 - 700 = 300 < 400
+
+    client.batch_distribute(&admin, &payments);
+}
+
+#[test]
+fn batch_distribute_exact_floor_succeeds() {
+    // A batch that leaves the pool balance exactly at the floor must succeed.
+    // Pool: 1_000, floor: 400, batch total: 600 → balance after = 400 = floor → OK.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let dev1 = Address::generate(&env);
+    let dev2 = Address::generate(&env);
+    let (pool_addr, client) = create_pool(&env);
+    let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc_address);
+    fund_pool(&usdc_admin, &pool_addr, 1_000);
+    client.set_min_pool_balance(&admin, &400);
+
+    let mut payments: Vec<(Address, i128)> = Vec::new(&env);
+    payments.push_back((dev1.clone(), 350_i128));
+    payments.push_back((dev2.clone(), 250_i128)); // total 600; 1000 - 600 = 400 = floor
+
+    client.batch_distribute(&admin, &payments);
+
+    assert_eq!(usdc_client.balance(&pool_addr), 400);
+    assert_eq!(usdc_client.balance(&dev1), 350);
+    assert_eq!(usdc_client.balance(&dev2), 250);
+}
+
+#[test]
+fn floor_zero_default_allows_full_drain() {
+    // With the default floor of 0, distributing the entire balance must succeed,
+    // preserving full backwards-compatibility for callers that never set a floor.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let developer = Address::generate(&env);
+    let (pool_addr, client) = create_pool(&env);
+    let (usdc_address, usdc_client, usdc_admin) = create_usdc(&env, &admin);
+
+    client.init(&admin, &usdc_address);
+    fund_pool(&usdc_admin, &pool_addr, 500);
+
+    // No set_min_pool_balance call — default floor is 0.
+    assert_eq!(client.get_min_pool_balance(), 0);
+
+    client.distribute(&admin, &developer, &500); // full drain
+
+    assert_eq!(usdc_client.balance(&pool_addr), 0);
+    assert_eq!(usdc_client.balance(&developer), 500);
 }
